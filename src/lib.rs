@@ -2,6 +2,8 @@ pub mod api {
     progenitor::generate_api!("openapi.json");
 }
 
+pub mod dokploy_client;
+
 use std::time::Duration;
 
 use anyhow::Context;
