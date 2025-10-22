@@ -110,7 +110,7 @@ async fn delete_preview(
         name
     } else {
         // Derive identifier -> default compose name
-        spinploy::dokploy_client::compute_identifier(body.pr_number, body.branch_name.as_deref())
+        spinploy::compute_identifier(body.pr_number.map(|n| n.to_string()), body.branch_name)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     };
 

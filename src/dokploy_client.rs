@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use crate::dokploy::{Compose, CreateComposeRequest, DeleteComposeRequest, Project};
+use crate::dokploy::{
+    Compose, ComposeDeployRequest, CreateComposeRequest, DeleteComposeRequest, Domain,
+    DomainCreateRequest, DomainUpdateRequest, Project, UpdateComposeRequest,
+};
 use anyhow::{Context, Result, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
@@ -149,24 +152,43 @@ impl DokployClient {
         )
         .await
     }
-}
 
-/// Build a deterministic identifier from PR number or branch name.
-pub fn compute_identifier(pr_number: Option<u64>, branch_name: Option<&str>) -> Result<String> {
-    if let Some(pr) = pr_number {
-        return Ok(format!("pr-{pr}"));
+    /// Update a compose definition.
+    pub async fn update_compose(&self, api_key: &str, req: UpdateComposeRequest) -> Result<Value> {
+        self.post::<Value>(api_key, "compose.update", req).await
     }
-    if let Some(branch) = branch_name {
-        let slug = branch
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect::<String>();
-        if slug.is_empty() {
-            bail!("branch name produced empty identifier");
-        }
-        return Ok(slug);
+
+    /// Trigger deployment of a compose.
+    pub async fn deploy_compose(
+        &self,
+        api_key: &str,
+        compose_id: impl AsRef<str>,
+    ) -> Result<Value> {
+        let body = ComposeDeployRequest {
+            compose_id: compose_id.as_ref().to_string(),
+        };
+        self.post::<Value>(api_key, "compose.deploy", body).await
     }
-    bail!("must provide pr_number or branch_name")
+
+    /// List domains attached to a compose.
+    pub async fn list_domains_by_compose_id(
+        &self,
+        api_key: &str,
+        compose_id: impl AsRef<str>,
+    ) -> Result<Vec<Domain>> {
+        let url = format!("domain.byComposeId?composeId={}", compose_id.as_ref());
+        self.get::<Vec<Domain>>(api_key, &url).await
+    }
+
+    /// Create a domain for a compose service.
+    pub async fn create_domain(&self, api_key: &str, req: DomainCreateRequest) -> Result<Value> {
+        self.post::<Value>(api_key, "domain.create", req).await
+    }
+
+    /// Update an existing domain for a compose service.
+    pub async fn update_domain(&self, api_key: &str, req: DomainUpdateRequest) -> Result<Value> {
+        self.post::<Value>(api_key, "domain.update", req).await
+    }
 }
 
 #[cfg(test)]
@@ -186,15 +208,5 @@ mod tests {
 
         let res = dbg!(client.find_compose_by_name(&api_key, "pr-1774").await);
         assert!(res.is_ok());
-    }
-
-    #[test]
-    fn test_compute_identifier() {
-        assert_eq!(compute_identifier(Some(42), None).unwrap(), "pr-42");
-        assert_eq!(
-            compute_identifier(None, Some("feature-branch")).unwrap(),
-            "feature-branch"
-        );
-        assert!(compute_identifier(None, None).is_err());
     }
 }
