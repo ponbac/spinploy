@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
-    let client = DokployClient::from_env_url()?;
+    let client = DokployClient::new(std::env::var("DOKPLOY_URL").unwrap());
     let state = AppState {
         client: Arc::new(client),
     };

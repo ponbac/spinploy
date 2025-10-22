@@ -1,33 +1,18 @@
-pub mod api {
-    progenitor::generate_api!("openapi.json");
-}
-
 pub mod dokploy_client;
+pub mod models;
 
-use std::time::Duration;
+pub use dokploy_client::*;
+pub use models::*;
 
-use anyhow::Context;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-
-pub fn build_client_from_env() -> anyhow::Result<api::Client> {
-    // Load variables from .env.local if present. Existing env vars take precedence.
-    let _ = dotenvy::from_filename(".env.local");
-
-    let baseurl = std::env::var("DOKPLOY_URL").context("$DOKPLOY_URL not set")?;
-    let api_key = std::env::var("DOKPLOY_API_KEY").context("$DOKPLOY_API_KEY not set")?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HeaderName::from_static("x-api-key"),
-        HeaderValue::from_str(&api_key).context("invalid API key value")?,
-    );
-
-    let http_client = reqwest::ClientBuilder::new()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(15))
-        .default_headers(headers)
-        .build()?;
-
-    let client = api::Client::new_with_client(baseurl.as_str(), http_client);
-    Ok(client)
+/// Test-only helper to ensure required Dokploy env vars are loaded.
+/// If `DOKPLOY_URL` or `DOKPLOY_API_KEY` are missing, it attempts to
+/// load them from a `.env.local` file at the crate root. Existing
+/// environment variables are never overwritten.
+#[cfg(test)]
+pub fn test_init_env() {
+    let need_url = std::env::var("DOKPLOY_URL").is_err();
+    let need_key = std::env::var("DOKPLOY_API_KEY").is_err();
+    if need_url || need_key {
+        let _ = dotenvy::from_filename(".env.local");
+    }
 }

@@ -1,10 +1,10 @@
 ## spinploy
 
-Lightweight HTTP API for Azure DevOps to create and manage PR preview deployments on Dokploy. It exposes simple endpoints designed for use from pipelines and service hooks, wrapping Dokploy via a generated client.
+Lightweight HTTP API for Azure DevOps to create and manage PR preview deployments on Dokploy. It exposes simple endpoints designed for use from pipelines and service hooks with a hand-written minimal Dokploy client.
 
 ### Status
 
-Early work-in-progress. Current server provides a health check and a typed Dokploy client; preview endpoints are being added next.
+Early work-in-progress. Current server provides a health check and preview endpoints are being added next.
 
 ### Quick start
 
@@ -63,6 +63,3 @@ Use a service hook (Pull request events) to call `POST /hooks/azure-devops` for 
 
 Run behind your preferred ingress/proxy. Add authentication/authorization at the edge (token, IP allowlist, or org SSO). Dokploy credentials are held server-side and never exposed to pipelines.
 
-### Development notes
-
-This project generates a typed Dokploy client from `openapi.json` using `progenitor`. Helper scripts exist for maintainers in `scripts/` to download and normalize the OpenAPI spec; they are optional for users of the API.
