@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use crate::dokploy::{
+use crate::models::dokploy::{
     Compose, ComposeDeployRequest, CreateComposeRequest, DeleteComposeRequest, Domain,
-    DomainCreateRequest, DomainUpdateRequest, Project, UpdateComposeRequest,
+    DomainCreateRequest, Project, UpdateComposeRequest,
 };
 use anyhow::{Context, Result, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -86,7 +86,7 @@ impl DokployClient {
         &self,
         api_key: impl AsRef<str> + std::fmt::Debug,
         compose_name: impl AsRef<str> + std::fmt::Debug,
-    ) -> Result<Compose> {
+    ) -> Result<Option<Compose>> {
         let projects = self.fetch_projects(api_key).await?;
 
         let matching_composes: Vec<_> = projects
@@ -97,11 +97,13 @@ impl DokployClient {
             .collect();
 
         match matching_composes.len() {
-            0 => bail!("compose '{:?}' not found", compose_name.as_ref()),
-            1 => Ok(matching_composes
-                .into_iter()
-                .next()
-                .expect("single compose found")),
+            0 => Ok(None),
+            1 => Ok(Some(
+                matching_composes
+                    .into_iter()
+                    .next()
+                    .expect("single compose found"),
+            )),
             _ => {
                 let ids: Vec<_> = matching_composes.iter().map(|c| &*c.compose_id).collect();
                 bail!(
@@ -183,11 +185,6 @@ impl DokployClient {
     /// Create a domain for a compose service.
     pub async fn create_domain(&self, api_key: &str, req: DomainCreateRequest) -> Result<Value> {
         self.post::<Value>(api_key, "domain.create", req).await
-    }
-
-    /// Update an existing domain for a compose service.
-    pub async fn update_domain(&self, api_key: &str, req: DomainUpdateRequest) -> Result<Value> {
-        self.post::<Value>(api_key, "domain.update", req).await
     }
 }
 

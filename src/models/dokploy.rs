@@ -89,19 +89,6 @@ pub struct DomainCreateRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DomainUpdateRequest {
-    pub domain_id: String,
-    pub host: String,
-    pub path: String,
-    pub port: u16,
-    pub https: bool,
-    pub certificate_type: String,
-    pub service_name: String,
-    pub domain_type: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ComposeDeployRequest {
     pub compose_id: String,
 }

@@ -21,3 +21,4 @@ tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.6.6", features = ["trace", "cors"] }
 futures = "0.3.31"
 regress = "0.10.0"
+config = "0.15.18"
