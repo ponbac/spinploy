@@ -67,6 +67,7 @@ pub struct UpdateComposeRequest {
     pub compose_type: String,
     pub custom_git_url: String,
     pub custom_git_branch: String,
+    #[serde(rename = "customGitSSHKeyId")]
     pub custom_git_ssh_key_id: String,
     pub compose_path: String,
     pub environment_id: String,

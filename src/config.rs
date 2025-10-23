@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use config::{Config as ConfigBuilder, Environment, File};
+use config::{Config as ConfigBuilder, Environment};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -19,10 +19,10 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
+        #[cfg(debug_assertions)]
+        dotenvy::from_filename(".env.local")?;
+
         let config = ConfigBuilder::builder()
-            // Start with .env.local file (optional, won't fail if missing)
-            .add_source(File::with_name(".env.local").required(false))
-            // Override with environment variables
             .add_source(Environment::default())
             .build()
             .context("Failed to build configuration")?;

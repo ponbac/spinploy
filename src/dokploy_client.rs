@@ -7,8 +7,7 @@ use crate::models::dokploy::{
 use anyhow::{Context, Result, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
-use tracing::instrument;
+// keep client lean; avoid verbose tracing here
 
 /// Lightweight wrapper around the Dokploy API using manual reqwest calls.
 #[derive(Clone, Debug)]
@@ -52,8 +51,9 @@ impl DokployClient {
             .await?
             .error_for_status()?;
 
-        let json = resp.json().await?;
-        serde_json::from_value::<T>(json).context("failed to deserialize response")
+        resp.json::<T>()
+            .await
+            .context("failed to deserialize response")
     }
 
     async fn post<T: DeserializeOwned>(
@@ -71,8 +71,21 @@ impl DokployClient {
             .await?
             .error_for_status()?;
 
-        let json = resp.json().await?;
-        serde_json::from_value::<T>(json).context("failed to deserialize response")
+        resp.json::<T>()
+            .await
+            .context("failed to deserialize response")
+    }
+
+    /// POST helper for endpoints where the response body is irrelevant.
+    async fn post_unit(&self, api_key: &str, url: &str, body: impl Serialize) -> Result<()> {
+        self.http
+            .post(self.join_url(url))
+            .headers(Self::auth_headers(api_key)?)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     /// Retrieve all projects with nested environments and compose definitions.
@@ -81,7 +94,6 @@ impl DokployClient {
             .await
     }
 
-    #[instrument(skip(self, api_key))]
     pub async fn find_compose_by_name(
         &self,
         api_key: impl AsRef<str> + std::fmt::Debug,
@@ -116,14 +128,13 @@ impl DokployClient {
     }
 
     /// Delete preview deployment (if it exists). Always deletes volumes.
-    #[instrument(skip(self, api_key))]
     pub async fn delete_compose(
         &self,
         api_key: &str,
         compose_id: impl AsRef<str> + std::fmt::Debug,
         delete_volumes: bool,
     ) -> Result<()> {
-        self.post::<()>(
+        self.post_unit(
             api_key,
             "compose.delete",
             DeleteComposeRequest {
@@ -134,7 +145,6 @@ impl DokployClient {
         .await
     }
 
-    #[instrument(skip(self, api_key))]
     pub async fn create_compose(
         &self,
         api_key: &str,
@@ -156,20 +166,16 @@ impl DokployClient {
     }
 
     /// Update a compose definition.
-    pub async fn update_compose(&self, api_key: &str, req: UpdateComposeRequest) -> Result<Value> {
-        self.post::<Value>(api_key, "compose.update", req).await
+    pub async fn update_compose(&self, api_key: &str, req: UpdateComposeRequest) -> Result<()> {
+        self.post_unit(api_key, "compose.update", req).await
     }
 
     /// Trigger deployment of a compose.
-    pub async fn deploy_compose(
-        &self,
-        api_key: &str,
-        compose_id: impl AsRef<str>,
-    ) -> Result<Value> {
+    pub async fn deploy_compose(&self, api_key: &str, compose_id: impl AsRef<str>) -> Result<()> {
         let body = ComposeDeployRequest {
             compose_id: compose_id.as_ref().to_string(),
         };
-        self.post::<Value>(api_key, "compose.deploy", body).await
+        self.post_unit(api_key, "compose.deploy", body).await
     }
 
     /// List domains attached to a compose.
@@ -179,12 +185,25 @@ impl DokployClient {
         compose_id: impl AsRef<str>,
     ) -> Result<Vec<Domain>> {
         let url = format!("domain.byComposeId?composeId={}", compose_id.as_ref());
-        self.get::<Vec<Domain>>(api_key, &url).await
+        let resp = self
+            .http
+            .get(self.join_url(&url))
+            .headers(Self::auth_headers(api_key)?)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let body = resp.text().await?;
+        if body.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        serde_json::from_str::<Vec<Domain>>(&body)
+            .context("failed to deserialize list domains response")
     }
 
     /// Create a domain for a compose service.
-    pub async fn create_domain(&self, api_key: &str, req: DomainCreateRequest) -> Result<Value> {
-        self.post::<Value>(api_key, "domain.create", req).await
+    pub async fn create_domain(&self, api_key: &str, req: DomainCreateRequest) -> Result<()> {
+        self.post_unit(api_key, "domain.create", req).await
     }
 }
 

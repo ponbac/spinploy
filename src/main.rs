@@ -25,12 +25,11 @@ async fn healthz(State(_state): State<AppState>) -> &'static str {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing with env filter, defaulting to info levels if RUST_LOG is unset.
+    // Initialize tracing with env filter, defaulting to debug levels if RUST_LOG is unset.
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,tower_http=info,axum=info"));
+        .unwrap_or_else(|_| EnvFilter::new("debug,axum=info,reqwest=info,hyper_util=info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
         .compact()
         .init();
 
@@ -49,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = std::env::var("BIND_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
+        .unwrap_or_else(|_| "0.0.0.0:8080".to_string())
         .parse()?;
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -116,10 +115,14 @@ async fn create_or_update_preview(
             .deploy_compose(&api_key, &compose.compose_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let domains = dokploy_client
+            .list_domains_by_compose_id(&api_key, &compose.compose_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         Ok(Json(ComposeCreateUpdateResponse {
             compose_id: compose.compose_id,
-            domains: compose.domains.iter().map(|d| d.host.clone()).collect(),
+            domains: domains.into_iter().map(|d| d.host).collect(),
         }))
     } else {
         let compose = dokploy_client
@@ -196,10 +199,14 @@ async fn create_or_update_preview(
             .deploy_compose(&api_key, &compose.compose_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let domains = dokploy_client
+            .list_domains_by_compose_id(&api_key, &compose.compose_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         Ok(Json(ComposeCreateUpdateResponse {
             compose_id: compose.compose_id,
-            domains: compose.domains.iter().map(|d| d.host.clone()).collect(),
+            domains: domains.into_iter().map(|d| d.host).collect(),
         }))
     }
 }
