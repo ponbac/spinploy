@@ -7,6 +7,7 @@ use axum::{
     http::StatusCode,
     routing::{delete, get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use spinploy::{Config, DokployClient, DomainCreateRequest, UpdateComposeRequest};
 use std::future::ready;
@@ -59,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Simple extractor to pull x-api-key from headers
+// Extractor to pull API key from `x-api-key` or fallback Basic auth password
 struct ApiKey(String);
 
 impl<S> axum::extract::FromRequestParts<S> for ApiKey
@@ -72,12 +73,38 @@ where
         parts: &mut Parts,
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let res = parts
+        let api_key = parts
             .headers
             .get("x-api-key")
             .and_then(|v| v.to_str().ok())
-            .map(|s| ApiKey(s.to_string()))
-            .ok_or((StatusCode::BAD_REQUEST, "missing x-api-key".to_string()));
+            .map(|s| s.to_string())
+            .or_else(|| {
+                parts
+                    .headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|auth| {
+                        let auth = auth.trim();
+                        let b64 = auth
+                            .strip_prefix("Basic ")
+                            .or_else(|| auth.strip_prefix("basic "))?;
+                        let decoded = BASE64.decode(b64.as_bytes()).ok()?;
+                        let creds = String::from_utf8(decoded).ok()?; // username:password
+                        let mut it = creds.splitn(2, ':');
+                        let _username = it.next();
+                        let password = it.next().unwrap_or("");
+                        if password.is_empty() {
+                            None
+                        } else {
+                            Some(password.to_string())
+                        }
+                    })
+            });
+
+        let res = api_key.map(ApiKey).ok_or((
+            StatusCode::BAD_REQUEST,
+            "missing x-api-key or Basic auth password".to_string(),
+        ));
         ready(res)
     }
 }
