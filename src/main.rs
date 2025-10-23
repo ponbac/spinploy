@@ -5,7 +5,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use spinploy::{Config, DokployClient, DomainCreateRequest, UpdateComposeRequest};
@@ -44,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/previews", post(create_or_update_preview))
+        .route("/previews", delete(delete_preview))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -208,5 +209,28 @@ async fn create_or_update_preview(
             compose_id: compose.compose_id,
             domains: domains.into_iter().map(|d| d.host).collect(),
         }))
+    }
+}
+
+async fn delete_preview(
+    State(AppState { dokploy_client, .. }): State<AppState>,
+    ApiKey(api_key): ApiKey,
+    Json(body): Json<ComposeCreateUpdateRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let identifier = spinploy::compute_identifier(&body.pr_id, &body.git_branch);
+
+    match dokploy_client
+        .find_compose_by_name(&api_key, &identifier)
+        .await
+    {
+        Ok(Some(compose)) => {
+            dokploy_client
+                .delete_compose(&api_key, &compose.compose_id, true)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Ok(None) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
