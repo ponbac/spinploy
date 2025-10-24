@@ -384,13 +384,7 @@ async fn azure_pr_comment_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
 
-    let branch = payload
-        .resource
-        .pull_request
-        .source_ref_name
-        .strip_prefix("refs/heads/")
-        .unwrap_or(&payload.resource.pull_request.source_ref_name)
-        .to_string();
+    let branch = spinploy::strip_refs_heads(&payload.resource.pull_request.source_ref_name);
     let pr_id = Some(payload.resource.pull_request.pull_request_id.to_string());
 
     tracing::info!(
@@ -462,12 +456,7 @@ async fn azure_pr_updated_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
-    let branch = payload
-        .resource
-        .source_ref_name
-        .strip_prefix("refs/heads/")
-        .unwrap_or(&payload.resource.source_ref_name)
-        .to_string();
+    let branch = spinploy::strip_refs_heads(&payload.resource.source_ref_name);
     let pr_id = Some(payload.resource.pull_request_id.to_string());
 
     // If this is a status update and PR is completed, delete preview (if target is main)
@@ -478,14 +467,8 @@ async fn azure_pr_updated_webhook(
         .map(|s| s.eq_ignore_ascii_case("completed"))
         .unwrap_or(false)
     {
-        let target_branch = payload
-            .resource
-            .target_ref_name
-            .as_deref()
-            .unwrap_or("")
-            .strip_prefix("refs/heads/")
-            .unwrap_or("")
-            .to_string();
+        let target_branch =
+            spinploy::strip_refs_heads(payload.resource.target_ref_name.as_deref().unwrap_or(""));
 
         tracing::info!(
             pr = pr_id.as_deref().unwrap_or("?"),

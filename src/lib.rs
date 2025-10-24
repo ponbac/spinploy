@@ -29,6 +29,12 @@ pub fn parse_ts(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
+/// Strips the common Git refs/heads/ prefix from a branch ref if present.
+/// Returns the original string when the prefix is absent.
+pub fn strip_refs_heads(s: &str) -> String {
+    s.strip_prefix("refs/heads/").unwrap_or(s).to_string()
+}
+
 /// Test-only helper to ensure required Dokploy env vars are loaded.
 /// If `DOKPLOY_URL` or `DOKPLOY_API_KEY` are missing, it attempts to
 /// load them from a `.env.local` file at the crate root. Existing
@@ -57,5 +63,13 @@ mod tests {
         );
         assert_eq!(compute_identifier(&None, "MAIN"), "br-main");
         assert_eq!(compute_identifier(&Some("42".to_string()), "MAIN"), "pr-42");
+    }
+
+    #[test]
+    fn test_strip_refs_heads() {
+        assert_eq!(strip_refs_heads("refs/heads/main"), "main");
+        assert_eq!(strip_refs_heads("refs/heads/feature/cool"), "feature/cool");
+        assert_eq!(strip_refs_heads("main"), "main");
+        assert_eq!(strip_refs_heads(""), "");
     }
 }
