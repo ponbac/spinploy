@@ -360,10 +360,25 @@ async fn azure_pr_comment_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
+    // No-op on deleted comments or missing/empty content
+    if payload.resource.comment.is_deleted
+        || payload
+            .resource
+            .comment
+            .content
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
     let Some(cmd) = &payload
         .resource
         .comment
         .content
+        .as_deref()
+        .unwrap_or("")
         .parse::<SlashCommand>()
         .ok()
     else {

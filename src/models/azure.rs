@@ -15,8 +15,12 @@ pub struct AzureResource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AzureComment {
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub is_deleted: bool,
     #[serde(rename = "_links")]
     pub links: AzureCommentLinks,
 }
