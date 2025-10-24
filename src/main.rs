@@ -239,9 +239,34 @@ async fn upsert_preview_internal(
     }
 }
 
+async fn delete_preview_internal(
+    dokploy_client: &DokployClient,
+    api_key: &str,
+    pr_id: &Option<String>,
+    git_branch: &str,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let identifier = spinploy::compute_identifier(&pr_id, &git_branch);
+
+    match dokploy_client
+        .find_compose_by_name(&api_key, &identifier)
+        .await
+    {
+        Ok(Some(compose)) => {
+            dokploy_client
+                .delete_compose(&api_key, &compose.compose_id, true)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Ok(None) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlashCommand {
     Preview,
+    Delete,
 }
 
 fn parse_slash_command(input: &str) -> Option<SlashCommand> {
@@ -249,6 +274,7 @@ fn parse_slash_command(input: &str) -> Option<SlashCommand> {
     let first_token = first_line.split_whitespace().next().unwrap_or("");
     match first_token.to_ascii_lowercase().as_str() {
         "/preview" => Some(SlashCommand::Preview),
+        "/delete" => Some(SlashCommand::Delete),
         _ => None,
     }
 }
@@ -269,6 +295,7 @@ async fn create_or_update_preview(
         &body.pr_id,
     )
     .await?;
+
     Ok(Json(resp))
 }
 
@@ -277,22 +304,9 @@ async fn delete_preview(
     ApiKey(api_key): ApiKey,
     Json(body): Json<ComposeCreateUpdateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let identifier = spinploy::compute_identifier(&body.pr_id, &body.git_branch);
+    delete_preview_internal(&dokploy_client, &api_key, &body.pr_id, &body.git_branch).await?;
 
-    match dokploy_client
-        .find_compose_by_name(&api_key, &identifier)
-        .await
-    {
-        Ok(Some(compose)) => {
-            dokploy_client
-                .delete_compose(&api_key, &compose.compose_id, true)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Ok(None) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn azure_pr_comment_webhook(
@@ -311,20 +325,26 @@ async fn azure_pr_comment_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
 
+    let branch = payload
+        .resource
+        .pull_request
+        .source_ref_name
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&payload.resource.pull_request.source_ref_name)
+        .to_string();
+    let pr_id = Some(payload.resource.pull_request.pull_request_id.to_string());
+
+    tracing::info!("Received Azure PR comment webhook for !{pr_id:?} on '{branch}': {payload:#?}");
+
     match cmd {
         SlashCommand::Preview => {
-            let branch = payload
-                .resource
-                .pull_request
-                .source_ref_name
-                .strip_prefix("refs/heads/")
-                .unwrap_or(&payload.resource.pull_request.source_ref_name)
-                .to_string();
-            let pr_id = Some(payload.resource.pull_request.pull_request_id.to_string());
-
             let resp = upsert_preview_internal(&dokploy_client, &config, &api_key, &branch, &pr_id)
                 .await?;
             Ok(Json(resp).into_response())
+        }
+        SlashCommand::Delete => {
+            delete_preview_internal(&dokploy_client, &api_key, &pr_id, &branch).await?;
+            Ok(StatusCode::NO_CONTENT.into_response())
         }
     }
 }
