@@ -40,8 +40,9 @@ You can also place these in a `.env.local` at the repo root.
 - POST `/previews` — create or update a preview environment
 - DELETE `/previews` — delete a preview environment
 - POST `/webhooks/azure/pr-comment` — handle PR comment slash commands (`/preview`, `/delete`)
-- POST `/webhooks/azure/pr-updated` — handle PR updated (PushNotification) to redeploy existing preview only
-- POST `/webhooks/azure/pr-merged` — handle PR merged; on successful merge to `main` deletes preview
+- POST `/webhooks/azure/pr-updated` —
+  - PushNotification: redeploy existing preview only
+  - StatusUpdateNotification: when PR status becomes completed and target is `main`, delete preview
 
 ### Azure DevOps usage
 
@@ -69,10 +70,9 @@ Service hooks:
   - Slash commands handled in the same PR thread:
     - `/preview`: creates/updates preview and replies with the frontend URL
     - `/delete`: deletes preview and replies "Preview deleted"
-- Pull request updated — Settings: `notificationType = PushNotification` — send to `/webhooks/azure/pr-updated`.
-  - This endpoint redeploys only if a preview already exists for the PR; otherwise it no-ops (204).
-- Pull request merge attempted — Publisher `tfs`, Event `git.pullrequest.merged` — send to `/webhooks/azure/pr-merged`.
-  - Optional filters: `branch = main`, `mergeResult = Succeeded`.
+- Pull request updated — create two subscriptions, both to `/webhooks/azure/pr-updated`:
+  - Settings: `notificationType = PushNotification` — Redeploy existing preview if present (204 if none)
+  - Settings: `notificationType = StatusUpdateNotification` — On status change to `completed`, delete preview (only when target branch is `main`)
 
 ### Security
 

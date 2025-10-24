@@ -61,7 +61,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/previews", delete(delete_preview))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
-        .route("/webhooks/azure/pr-merged", post(azure_pr_merged_webhook))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -471,6 +470,36 @@ async fn azure_pr_updated_webhook(
         .to_string();
     let pr_id = Some(payload.resource.pull_request_id.to_string());
 
+    // If this is a status update and PR is completed, delete preview (if target is main)
+    if payload
+        .resource
+        .status
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("completed"))
+        .unwrap_or(false)
+    {
+        let target_branch = payload
+            .resource
+            .target_ref_name
+            .as_deref()
+            .unwrap_or("")
+            .strip_prefix("refs/heads/")
+            .unwrap_or("")
+            .to_string();
+
+        tracing::info!(
+            pr = pr_id.as_deref().unwrap_or("?"),
+            source_branch = branch,
+            target_branch,
+            "Received Azure PR updated webhook (status=completed)"
+        );
+
+        if target_branch == "main" {
+            delete_preview_internal(&dokploy_client, &api_key, &pr_id, &branch).await?;
+        }
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
     tracing::info!(
         pr = pr_id.as_deref().unwrap_or("?"),
         branch,
@@ -478,49 +507,6 @@ async fn azure_pr_updated_webhook(
     );
 
     redeploy_preview_if_exists(&dokploy_client, &api_key, &pr_id, &branch).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-async fn azure_pr_merged_webhook(
-    State(AppState { dokploy_client, .. }): State<AppState>,
-    ApiKey(api_key): ApiKey,
-    Json(payload): Json<AzurePrMergedEvent>,
-) -> Result<axum::response::Response, (StatusCode, String)> {
-    if payload.event_type != "git.pullrequest.merged" {
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    }
-
-    let target_branch = payload
-        .resource
-        .target_ref_name
-        .strip_prefix("refs/heads/")
-        .unwrap_or(&payload.resource.target_ref_name)
-        .to_string();
-    let source_branch = payload
-        .resource
-        .source_ref_name
-        .strip_prefix("refs/heads/")
-        .unwrap_or(&payload.resource.source_ref_name)
-        .to_string();
-    let pr_id = Some(payload.resource.pull_request_id.to_string());
-
-    tracing::info!(
-        pr = pr_id.as_deref().unwrap_or("?"),
-        source_branch,
-        target_branch,
-        merge_status = %payload.resource.merge_status,
-        "Received Azure PR merged webhook"
-    );
-
-    if payload
-        .resource
-        .merge_status
-        .eq_ignore_ascii_case("succeeded")
-        && target_branch == "main"
-    {
-        delete_preview_internal(&dokploy_client, &api_key, &pr_id, &source_branch).await?;
-    }
-
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
