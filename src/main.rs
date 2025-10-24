@@ -11,7 +11,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use spinploy::models::azure::*;
-use spinploy::{Config, DokployClient, DomainCreateRequest, UpdateComposeRequest};
+use spinploy::{Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest};
 use std::future::ready;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -245,7 +245,7 @@ async fn delete_preview_internal(
     pr_id: &Option<String>,
     git_branch: &str,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let identifier = spinploy::compute_identifier(&pr_id, &git_branch);
+    let identifier = spinploy::compute_identifier(pr_id, git_branch);
 
     match dokploy_client
         .find_compose_by_name(&api_key, &identifier)
@@ -253,29 +253,13 @@ async fn delete_preview_internal(
     {
         Ok(Some(compose)) => {
             dokploy_client
-                .delete_compose(&api_key, &compose.compose_id, true)
+                .delete_compose(api_key, &compose.compose_id, true)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(StatusCode::NO_CONTENT)
         }
         Ok(None) => Ok(StatusCode::NO_CONTENT),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlashCommand {
-    Preview,
-    Delete,
-}
-
-fn parse_slash_command(input: &str) -> Option<SlashCommand> {
-    let first_line = input.lines().next().unwrap_or("").trim();
-    let first_token = first_line.split_whitespace().next().unwrap_or("");
-    match first_token.to_ascii_lowercase().as_str() {
-        "/preview" => Some(SlashCommand::Preview),
-        "/delete" => Some(SlashCommand::Delete),
-        _ => None,
     }
 }
 
@@ -321,7 +305,13 @@ async fn azure_pr_comment_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
-    let Some(cmd) = parse_slash_command(&payload.resource.comment.content) else {
+    let Some(cmd) = &payload
+        .resource
+        .comment
+        .content
+        .parse::<SlashCommand>()
+        .ok()
+    else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
 
@@ -334,7 +324,10 @@ async fn azure_pr_comment_webhook(
         .to_string();
     let pr_id = Some(payload.resource.pull_request.pull_request_id.to_string());
 
-    tracing::info!("Received Azure PR comment webhook for !{pr_id:?} on '{branch}': {payload:#?}");
+    tracing::info!(
+        "Received Azure PR comment webhook for !{} on '{branch}': {cmd:?}",
+        pr_id.as_deref().unwrap_or("?"),
+    );
 
     match cmd {
         SlashCommand::Preview => {

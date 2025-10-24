@@ -1,10 +1,12 @@
 pub mod config;
 pub mod dokploy_client;
 pub mod models;
+pub mod slash_cmd;
 
 pub use config::Config;
 pub use dokploy_client::DokployClient;
 pub use models::dokploy::*;
+pub use slash_cmd::*;
 
 /// Computes the identifier for Dokploy preview deployments.
 /// Prefers PR number if provided, otherwise uses sanitized branch name.
