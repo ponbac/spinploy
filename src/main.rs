@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/previews", post(create_or_update_preview))
         .route("/previews", delete(delete_preview))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
+        .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -263,6 +264,37 @@ async fn delete_preview_internal(
     }
 }
 
+async fn redeploy_preview_if_exists(
+    dokploy_client: &DokployClient,
+    api_key: &str,
+    pr_id: &Option<String>,
+    git_branch: &str,
+) -> Result<(), (StatusCode, String)> {
+    let identifier = spinploy::compute_identifier(pr_id, git_branch);
+    match dokploy_client
+        .find_compose_by_name(api_key, &identifier)
+        .await
+    {
+        Ok(Some(compose)) => {
+            tracing::info!(
+                compose_id = compose.compose_id,
+                identifier,
+                "Redeploying existing preview"
+            );
+            dokploy_client
+                .deploy_compose(api_key, &compose.compose_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(())
+        }
+        Ok(None) => {
+            tracing::info!(identifier, "No existing preview to redeploy; skipping");
+            Ok(())
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
 async fn create_or_update_preview(
     State(AppState {
         dokploy_client,
@@ -325,8 +357,10 @@ async fn azure_pr_comment_webhook(
     let pr_id = Some(payload.resource.pull_request.pull_request_id.to_string());
 
     tracing::info!(
-        "Received Azure PR comment webhook for !{} on '{branch}': {cmd:?}",
-        pr_id.as_deref().unwrap_or("?"),
+        pr = pr_id.as_deref().unwrap_or("?"),
+        branch,
+        ?cmd,
+        "Received Azure PR comment webhook"
     );
 
     match cmd {
@@ -340,4 +374,31 @@ async fn azure_pr_comment_webhook(
             Ok(StatusCode::NO_CONTENT.into_response())
         }
     }
+}
+
+async fn azure_pr_updated_webhook(
+    State(AppState { dokploy_client, .. }): State<AppState>,
+    ApiKey(api_key): ApiKey,
+    Json(payload): Json<AzurePrUpdatedEvent>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    if payload.event_type != "git.pullrequest.updated" {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    let branch = payload
+        .resource
+        .source_ref_name
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&payload.resource.source_ref_name)
+        .to_string();
+    let pr_id = Some(payload.resource.pull_request_id.to_string());
+
+    tracing::info!(
+        pr = pr_id.as_deref().unwrap_or("?"),
+        branch,
+        "Received Azure PR updated webhook (push). Attempting redeploy if exists"
+    );
+
+    redeploy_preview_if_exists(&dokploy_client, &api_key, &pr_id, &branch).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

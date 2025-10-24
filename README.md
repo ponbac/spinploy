@@ -33,10 +33,10 @@ You can also place these in a `.env.local` at the repo root.
 ### API
 
 - GET `/healthz` — service health probe
-- Planned:
-  - POST `/previews` — create/update a preview environment for a PR/commit
-  - DELETE `/previews/{id}` — delete a preview environment
-  - POST `/hooks/azure-devops` — handle PR open/update/merge events
+- POST `/previews` — create or update a preview environment
+- DELETE `/previews` — delete a preview environment
+- POST `/webhooks/azure/pr-comment` — handle PR comment slash commands (`/preview`, `/delete`)
+- POST `/webhooks/azure/pr-updated` — handle PR updated (PushNotification) to redeploy existing preview only
 
 ### Azure DevOps usage
 
@@ -57,9 +57,12 @@ Add a lightweight step in your pipeline to create/update a preview on each PR bu
           }'
 ```
 
-Use a service hook (Pull request events) to call `POST /hooks/azure-devops` for create/update/cleanup based on PR lifecycle.
+Service hooks:
+
+- Pull request commented on: send to `/webhooks/azure/pr-comment`.
+- Pull request updated — Settings: `notificationType = PushNotification` — send to `/webhooks/azure/pr-updated`.
+  - This endpoint redeploys only if a preview already exists for the PR; otherwise it no-ops (204).
 
 ### Security
 
 Run behind your preferred ingress/proxy. Add authentication/authorization at the edge (token, IP allowlist, or org SSO). Dokploy credentials are held server-side and never exposed to pipelines.
-
