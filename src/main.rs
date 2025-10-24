@@ -11,10 +11,14 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use spinploy::models::azure::*;
-use spinploy::{Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest};
+use spinploy::{
+    Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest, parse_ts,
+};
 use std::future::ready;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+
+const PREVIEW_LIMIT: usize = 5;
 
 #[derive(Clone)]
 struct AppState {
@@ -234,6 +238,15 @@ async fn upsert_preview_internal(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // Prune previews in the environment after creating this one
+        prune_previews_if_over_limit(
+            dokploy_client,
+            api_key,
+            &config.environment_id,
+            &compose.compose_id,
+        )
+        .await;
+
         Ok(ComposeCreateUpdateResponse {
             compose_id: compose.compose_id,
             domains: domains.into_iter().map(|d| d.host).collect(),
@@ -445,4 +458,83 @@ async fn azure_pr_merged_webhook(
     }
 
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn prune_previews_if_over_limit(
+    client: &DokployClient,
+    api_key: &str,
+    environment_id: &str,
+    exclude_compose_id: &str,
+) {
+    if let Ok(mut comps) = client
+        .list_composes_with_prefix(api_key, environment_id, "preview-")
+        .await
+    {
+        comps.retain(|c| c.compose_id != exclude_compose_id);
+        let total_after_creation = comps.len() + 1; // include the newly created preview
+        if total_after_creation > PREVIEW_LIMIT {
+            let to_delete = total_after_creation - PREVIEW_LIMIT;
+
+            // Fetch compose details concurrently
+            let mut detailed =
+                futures::future::join_all(comps.iter().cloned().map(|c| async move {
+                    (
+                        c.clone(),
+                        client.get_compose_detail(api_key, &c.compose_id).await,
+                    )
+                }))
+                .await;
+
+            // Sort by latest deployment timestamp (finishedAt -> startedAt -> createdAt), fallback to compose createdAt
+            detailed.sort_by_key(|(_c, detail)| {
+                detail
+                    .as_ref()
+                    .ok()
+                    .and_then(|dd| {
+                        dd.deployments
+                            .iter()
+                            .filter_map(|d| d.finished_at.as_deref())
+                            .filter_map(parse_ts)
+                            .max()
+                    })
+                    .or_else(|| {
+                        detail.as_ref().ok().and_then(|dd| {
+                            dd.deployments
+                                .iter()
+                                .filter_map(|d| d.started_at.as_deref())
+                                .filter_map(parse_ts)
+                                .max()
+                        })
+                    })
+                    .or_else(|| {
+                        detail.as_ref().ok().and_then(|dd| {
+                            dd.deployments
+                                .iter()
+                                .filter_map(|d| d.created_at.as_deref())
+                                .filter_map(parse_ts)
+                                .max()
+                        })
+                    })
+                    .or_else(|| {
+                        detail
+                            .as_ref()
+                            .ok()
+                            .and_then(|dd| dd.created_at.as_deref().and_then(parse_ts))
+                    })
+            });
+
+            for (doomed, _detail) in detailed.into_iter().take(to_delete) {
+                if let Err(e) = client
+                    .delete_compose(api_key, &doomed.compose_id, true)
+                    .await
+                {
+                    tracing::warn!(
+                        compose_id = doomed.compose_id,
+                        error = %e,
+                        "Failed to prune preview"
+                    );
+                }
+            }
+        }
+    }
 }

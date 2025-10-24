@@ -29,6 +29,8 @@ pub struct Compose {
     pub environment_id: String,
     #[serde(default)]
     pub domains: Vec<Domain>,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,4 +94,26 @@ pub struct DomainCreateRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ComposeDeployRequest {
     pub compose_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deployment {
+    pub deployment_id: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeDetail {
+    pub compose_id: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub deployments: Vec<Deployment>,
 }

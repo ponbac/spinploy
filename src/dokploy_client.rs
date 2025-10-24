@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crate::models::dokploy::{
-    Compose, ComposeDeployRequest, CreateComposeRequest, DeleteComposeRequest, Domain,
-    DomainCreateRequest, Project, UpdateComposeRequest,
+    Compose, ComposeDeployRequest, ComposeDetail, CreateComposeRequest, DeleteComposeRequest,
+    Domain, DomainCreateRequest, Project, UpdateComposeRequest,
 };
 use anyhow::{Context, Result, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -204,6 +204,39 @@ impl DokployClient {
     /// Create a domain for a compose service.
     pub async fn create_domain(&self, api_key: &str, req: DomainCreateRequest) -> Result<()> {
         self.post_unit(api_key, "domain.create", req).await
+    }
+
+    /// List composes in a given environment with a given app name prefix
+    pub async fn list_composes_with_prefix(
+        &self,
+        api_key: &str,
+        environment_id: &str,
+        app_name_prefix: &str,
+    ) -> Result<Vec<Compose>> {
+        let projects = self.fetch_projects(api_key).await?;
+        let mut comps = Vec::new();
+        for project in projects.into_iter() {
+            for env in project.environments.into_iter() {
+                if env.environment_id == environment_id {
+                    comps.extend(
+                        env.compose
+                            .into_iter()
+                            .filter(|c| c.app_name.starts_with(app_name_prefix)),
+                    );
+                }
+            }
+        }
+        Ok(comps)
+    }
+
+    /// Fetch a compose detail (compose.one)
+    pub async fn get_compose_detail(
+        &self,
+        api_key: &str,
+        compose_id: &str,
+    ) -> Result<ComposeDetail> {
+        let url = format!("compose.one?composeId={}", compose_id);
+        self.get::<ComposeDetail>(api_key, &url).await
     }
 }
 

@@ -22,6 +22,12 @@ pub fn compute_identifier(pr_number: &Option<String>, branch_name: &str) -> Stri
     format!("br-{}", sanitized)
 }
 
+pub fn parse_ts(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
 /// Test-only helper to ensure required Dokploy env vars are loaded.
 /// If `DOKPLOY_URL` or `DOKPLOY_API_KEY` are missing, it attempts to
 /// load them from a `.env.local` file at the crate root. Existing
