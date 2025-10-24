@@ -40,3 +40,20 @@ pub struct AzurePrUpdatedResource {
     pub pull_request_id: u64,
     pub source_ref_name: String,
 }
+
+// Azure DevOps git.pullrequest.merged minimal payload
+#[derive(Debug, Deserialize)]
+pub struct AzurePrMergedEvent {
+    #[serde(rename = "eventType")]
+    pub event_type: String,
+    pub resource: AzurePrMergedResource,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzurePrMergedResource {
+    pub pull_request_id: u64,
+    pub source_ref_name: String,
+    pub target_ref_name: String,
+    pub merge_status: String,
+}
