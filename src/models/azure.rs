@@ -17,6 +17,22 @@ pub struct AzureResource {
 #[derive(Debug, Deserialize)]
 pub struct AzureComment {
     pub content: String,
+    #[serde(rename = "_links")]
+    pub links: AzureCommentLinks,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureCommentLinks {
+    #[serde(rename = "self")]
+    pub self_: Option<AzureHref>,
+    #[serde(rename = "repository")]
+    pub repository: Option<AzureHref>,
+    pub threads: AzureHref,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureHref {
+    pub href: String,
 }
 
 #[derive(Debug, Deserialize)]

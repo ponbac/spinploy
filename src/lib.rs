@@ -1,3 +1,4 @@
+pub mod azure_client;
 pub mod config;
 pub mod dokploy_client;
 pub mod models;

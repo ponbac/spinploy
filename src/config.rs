@@ -15,6 +15,11 @@ pub struct Config {
     pub frontend_port: u16,
     pub backend_service_name: String,
     pub backend_port: u16,
+    // Azure DevOps configuration for posting PR comments
+    pub azdo_org: String,
+    pub azdo_project: String,
+    pub azdo_repository_id: String,
+    pub azdo_pat: String,
 }
 
 impl Config {

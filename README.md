@@ -27,6 +27,10 @@ cargo run
 - **DOKPLOY_API_KEY**: Dokploy API key (sent as `x-api-key`)
 - **BIND_ADDR**: Server bind address (default `0.0.0.0:3000`)
 - **RUST_LOG**: Tracing filter (e.g., `debug`, `info`)
+- **AZDO_ORG**: Azure DevOps organization
+- **AZDO_PROJECT**: Azure DevOps project
+- **AZDO_REPOSITORY_ID**: Azure DevOps repository ID
+- **AZDO_PAT**: Azure DevOps Personal Access Token (Code Write to post comments)
 
 You can also place these in a `.env.local` at the repo root.
 
@@ -61,6 +65,10 @@ Add a lightweight step in your pipeline to create/update a preview on each PR bu
 Service hooks:
 
 - Pull request commented on: send to `/webhooks/azure/pr-comment`.
+  - Authentication: include `x-api-key` header (or Basic with password only) matching server config
+  - Slash commands handled in the same PR thread:
+    - `/preview`: creates/updates preview and replies with the frontend URL
+    - `/delete`: deletes preview and replies "Preview deleted"
 - Pull request updated — Settings: `notificationType = PushNotification` — send to `/webhooks/azure/pr-updated`.
   - This endpoint redeploys only if a preview already exists for the PR; otherwise it no-ops (204).
 - Pull request merge attempted — Publisher `tfs`, Event `git.pullrequest.merged` — send to `/webhooks/azure/pr-merged`.

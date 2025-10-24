@@ -10,6 +10,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
+use spinploy::azure_client::AzureDevOpsClient;
 use spinploy::models::azure::*;
 use spinploy::{
     Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest, parse_ts,
@@ -24,6 +25,7 @@ const PREVIEW_LIMIT: usize = 5;
 struct AppState {
     dokploy_client: Arc<DokployClient>,
     config: Config,
+    azure_client: Arc<AzureDevOpsClient>,
 }
 
 async fn healthz(State(_state): State<AppState>) -> &'static str {
@@ -45,6 +47,11 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         dokploy_client: Arc::new(client),
+        azure_client: Arc::new(AzureDevOpsClient::new(
+            &config.azdo_org,
+            &config.azdo_project,
+            &config.azdo_pat,
+        )),
         config,
     };
 
@@ -313,6 +320,7 @@ async fn create_or_update_preview(
     State(AppState {
         dokploy_client,
         config,
+        ..
     }): State<AppState>,
     ApiKey(api_key): ApiKey,
     Json(body): Json<ComposeCreateUpdateRequest>,
@@ -343,6 +351,7 @@ async fn azure_pr_comment_webhook(
     State(AppState {
         dokploy_client,
         config,
+        azure_client,
     }): State<AppState>,
     ApiKey(api_key): ApiKey,
     Json(payload): Json<AzurePrCommentEvent>,
@@ -377,14 +386,54 @@ async fn azure_pr_comment_webhook(
         "Received Azure PR comment webhook"
     );
 
+    // Extract thread id from the threads link ending with /threads/{id}
+    let thread_href = &payload.resource.comment.links.threads.href;
+    let thread_id = thread_href
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "invalid threads href in payload".to_string(),
+        ))?;
+    let repo_id = &config.azdo_repository_id;
+
     match cmd {
         SlashCommand::Preview => {
             let resp = upsert_preview_internal(&dokploy_client, &config, &api_key, &branch, &pr_id)
                 .await?;
+
+            let identifier = spinploy::compute_identifier(&pr_id, &branch);
+            let frontend = format!("https://{}.{}", identifier, &config.base_domain);
+            if let Err(e) = azure_client
+                .reply_in_thread(
+                    repo_id,
+                    payload.resource.pull_request.pull_request_id,
+                    thread_id,
+                    &format!("Preview building, should be available soon: {}", frontend),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to post ADO reply for /preview");
+            }
+
             Ok(Json(resp).into_response())
         }
         SlashCommand::Delete => {
             delete_preview_internal(&dokploy_client, &api_key, &pr_id, &branch).await?;
+
+            if let Err(e) = azure_client
+                .reply_in_thread(
+                    repo_id,
+                    payload.resource.pull_request.pull_request_id,
+                    thread_id,
+                    "Preview deleted",
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to post ADO reply for /delete");
+            }
+
             Ok(StatusCode::NO_CONTENT.into_response())
         }
     }
