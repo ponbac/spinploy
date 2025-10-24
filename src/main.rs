@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::http::request::Parts;
+use axum::response::IntoResponse;
 use axum::{
     Json, Router,
     extract::State,
@@ -9,6 +10,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
+use spinploy::models::azure::*;
 use spinploy::{Config, DokployClient, DomainCreateRequest, UpdateComposeRequest};
 use std::future::ready;
 use tower_http::trace::TraceLayer;
@@ -46,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(healthz))
         .route("/previews", post(create_or_update_preview))
         .route("/previews", delete(delete_preview))
+        .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -123,38 +126,37 @@ pub struct ComposeCreateUpdateResponse {
     pub domains: Vec<String>,
 }
 
-async fn create_or_update_preview(
-    State(AppState {
-        dokploy_client,
-        config,
-    }): State<AppState>,
-    ApiKey(api_key): ApiKey,
-    Json(body): Json<ComposeCreateUpdateRequest>,
-) -> Result<Json<ComposeCreateUpdateResponse>, (StatusCode, String)> {
-    let identifier = spinploy::compute_identifier(&body.pr_id, &body.git_branch);
+async fn upsert_preview_internal(
+    dokploy_client: &DokployClient,
+    config: &Config,
+    api_key: &str,
+    git_branch: &str,
+    pr_id: &Option<String>,
+) -> Result<ComposeCreateUpdateResponse, (StatusCode, String)> {
+    let identifier = spinploy::compute_identifier(pr_id, git_branch);
     let app_name = format!("preview-{}", &identifier);
 
     if let Some(compose) = dokploy_client
-        .find_compose_by_name(&api_key, &identifier)
+        .find_compose_by_name(api_key, &identifier)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?
     {
         dokploy_client
-            .deploy_compose(&api_key, &compose.compose_id)
+            .deploy_compose(api_key, &compose.compose_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let domains = dokploy_client
-            .list_domains_by_compose_id(&api_key, &compose.compose_id)
+            .list_domains_by_compose_id(api_key, &compose.compose_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        Ok(Json(ComposeCreateUpdateResponse {
+        Ok(ComposeCreateUpdateResponse {
             compose_id: compose.compose_id,
             domains: domains.into_iter().map(|d| d.host).collect(),
-        }))
+        })
     } else {
         let compose = dokploy_client
-            .create_compose(&api_key, &config.environment_id, &identifier, &app_name)
+            .create_compose(api_key, &config.environment_id, &identifier, &app_name)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -167,7 +169,7 @@ async fn create_or_update_preview(
 
         dokploy_client
             .update_compose(
-                &api_key,
+                api_key,
                 UpdateComposeRequest {
                     compose_id: compose.compose_id.clone(),
                     name: identifier.clone(),
@@ -180,17 +182,16 @@ async fn create_or_update_preview(
                     source_type: "git".to_string(),
                     compose_type: "docker-compose".to_string(),
                     custom_git_url: config.custom_git_url.clone(),
-                    custom_git_branch: body.git_branch.clone(),
+                    custom_git_branch: git_branch.to_string(),
                     custom_git_ssh_key_id: config.custom_git_ssh_key_id.clone(),
                 },
             )
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        // Frontend domain
         dokploy_client
             .create_domain(
-                &api_key,
+                api_key,
                 DomainCreateRequest {
                     compose_id: compose.compose_id.clone(),
                     service_name: config.frontend_service_name.clone(),
@@ -204,10 +205,10 @@ async fn create_or_update_preview(
             )
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        // Backend domain
+
         dokploy_client
             .create_domain(
-                &api_key,
+                api_key,
                 DomainCreateRequest {
                     compose_id: compose.compose_id.clone(),
                     service_name: config.backend_service_name.clone(),
@@ -222,21 +223,53 @@ async fn create_or_update_preview(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        // Deploy
         dokploy_client
-            .deploy_compose(&api_key, &compose.compose_id)
+            .deploy_compose(api_key, &compose.compose_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let domains = dokploy_client
-            .list_domains_by_compose_id(&api_key, &compose.compose_id)
+            .list_domains_by_compose_id(api_key, &compose.compose_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        Ok(Json(ComposeCreateUpdateResponse {
+        Ok(ComposeCreateUpdateResponse {
             compose_id: compose.compose_id,
             domains: domains.into_iter().map(|d| d.host).collect(),
-        }))
+        })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlashCommand {
+    Preview,
+}
+
+fn parse_slash_command(input: &str) -> Option<SlashCommand> {
+    let first_line = input.lines().next().unwrap_or("").trim();
+    let first_token = first_line.split_whitespace().next().unwrap_or("");
+    match first_token.to_ascii_lowercase().as_str() {
+        "/preview" => Some(SlashCommand::Preview),
+        _ => None,
+    }
+}
+
+async fn create_or_update_preview(
+    State(AppState {
+        dokploy_client,
+        config,
+    }): State<AppState>,
+    ApiKey(api_key): ApiKey,
+    Json(body): Json<ComposeCreateUpdateRequest>,
+) -> Result<Json<ComposeCreateUpdateResponse>, (StatusCode, String)> {
+    let resp = upsert_preview_internal(
+        &dokploy_client,
+        &config,
+        &api_key,
+        &body.git_branch,
+        &body.pr_id,
+    )
+    .await?;
+    Ok(Json(resp))
 }
 
 async fn delete_preview(
@@ -259,5 +292,39 @@ async fn delete_preview(
         }
         Ok(None) => Ok(StatusCode::NO_CONTENT),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn azure_pr_comment_webhook(
+    State(AppState {
+        dokploy_client,
+        config,
+    }): State<AppState>,
+    ApiKey(api_key): ApiKey,
+    Json(payload): Json<AzurePrCommentEvent>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    if payload.event_type != "ms.vss-code.git-pullrequest-comment-event" {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    let Some(cmd) = parse_slash_command(&payload.resource.comment.content) else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+
+    match cmd {
+        SlashCommand::Preview => {
+            let branch = payload
+                .resource
+                .pull_request
+                .source_ref_name
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&payload.resource.pull_request.source_ref_name)
+                .to_string();
+            let pr_id = Some(payload.resource.pull_request.pull_request_id.to_string());
+
+            let resp = upsert_preview_internal(&dokploy_client, &config, &api_key, &branch, &pr_id)
+                .await?;
+            Ok(Json(resp).into_response())
+        }
     }
 }
