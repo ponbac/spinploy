@@ -20,6 +20,8 @@ pub struct Config {
     pub azdo_project: String,
     pub azdo_repository_id: String,
     pub azdo_pat: String,
+    // Apport
+    pub bacpac_url: String,
 }
 
 impl Config {
