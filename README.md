@@ -69,6 +69,26 @@ This API key must be a Dokploy API key with permissions for the target project/e
 - BIND_ADDR (optional): Server bind address (default `0.0.0.0:8080`)
 - RUST_LOG (optional): Tracing filter (defaults internally to `debug,axum=info,reqwest=info,hyper_util=info`)
 
+#### Optional: Protected static storage
+
+If you want the API to also serve static files (like a simple storage bucket) behind a header-based token, set:
+
+- `STORAGE_DIR`: Absolute path to the directory to serve
+- `STORAGE_TOKEN`: Shared secret token clients must send in the `x-storage-token` header
+
+When configured, files are available under `/storage/*`. Requests must include:
+
+```
+x-storage-token: <STORAGE_TOKEN>
+```
+
+Example request:
+
+```bash
+curl -H "x-storage-token: $STORAGE_TOKEN" \
+     https://your-spinploy.example.com/storage/path/to/file.txt -o file.txt
+```
+
 ### API
 
 - GET `/healthz` — service health probe
@@ -86,6 +106,31 @@ This API key must be a Dokploy API key with permissions for the target project/e
   - Status change to `completed`: if target branch is `main`, delete preview
 
 All API calls must include the API key as described in Authentication.
+
+When storage is enabled, static files are served at `GET /storage/*` and require the `x-storage-token` header.
+
+### Docker volume example
+
+Mount a host directory and expose it via `/storage/*`:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e DOKPLOY_URL=... \
+  -e PROJECT_ID=... \
+  -e ENVIRONMENT_ID=... \
+  -e CUSTOM_GIT_URL=... \
+  -e CUSTOM_GIT_SSH_KEY_ID=... \
+  -e COMPOSE_PATH=./docker-compose.yml \
+  -e BASE_DOMAIN=preview.example.com \
+  -e FRONTEND_SERVICE_NAME=web \
+  -e FRONTEND_PORT=3000 \
+  -e BACKEND_SERVICE_NAME=api \
+  -e BACKEND_PORT=8080 \
+  -e AZDO_ORG=... -e AZDO_PROJECT=... -e AZDO_REPOSITORY_ID=... -e AZDO_PAT=... \
+  -e STORAGE_DIR=/data/storage -e STORAGE_TOKEN=supersecret \
+  -v /absolute/path/on/host:/data/storage:ro \
+  your/spinploy:latest
+```
 
 ### Azure DevOps usage
 

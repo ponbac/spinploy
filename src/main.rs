@@ -1,11 +1,14 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use axum::body::Body;
 use axum::http::request::Parts;
+use axum::http::{HeaderName, Request};
 use axum::response::IntoResponse;
 use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    middleware::{self, Next},
     routing::{delete, get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -16,6 +19,7 @@ use spinploy::{
     Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest, parse_ts,
 };
 use std::future::ready;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -30,6 +34,29 @@ struct AppState {
 
 async fn healthz(State(_state): State<AppState>) -> &'static str {
     "ok"
+}
+
+// Middleware to protect static storage with a simple header token check
+async fn storage_auth(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let Some(expected) = state.config.storage_token.as_deref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let header_name = HeaderName::from_static("x-storage-token");
+    let provided = req
+        .headers()
+        .get(&header_name)
+        .and_then(|v| v.to_str().ok());
+
+    if Some(expected) == provided {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 #[tokio::main]
@@ -55,14 +82,32 @@ async fn main() -> anyhow::Result<()> {
         config,
     };
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route("/previews", post(create_or_update_preview))
         .route("/previews", delete(delete_preview))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
-        .with_state(state)
+        .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
+
+    if let (Some(dir), Some(_token)) = (
+        state.config.storage_dir.clone(),
+        state.config.storage_token.clone(),
+    ) {
+        let storage_router = Router::new()
+            .route_service("/*path", ServeDir::new(dir))
+            .route_layer(middleware::from_fn_with_state(state.clone(), storage_auth))
+            .with_state(state.clone());
+
+        app = app.nest("/storage", storage_router);
+    } else {
+        tracing::info!(
+            has_dir = state.config.storage_dir.is_some(),
+            has_token = state.config.storage_token.is_some(),
+            "Storage serving disabled: missing STORAGE_DIR or STORAGE_TOKEN"
+        );
+    }
 
     let addr: SocketAddr = std::env::var("BIND_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_string())

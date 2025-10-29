@@ -22,6 +22,9 @@ pub struct Config {
     pub azdo_pat: String,
     // Apport
     pub bacpac_url: String,
+    // Optional protected storage settings
+    pub storage_dir: Option<String>,
+    pub storage_token: Option<String>,
 }
 
 impl Config {
