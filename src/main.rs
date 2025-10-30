@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(storage_config) = state.config.storage.clone() {
         let storage_router = Router::new()
-            .route_service("/*path", ServeDir::new(storage_config.dir))
+            .route_service("/{*path}", ServeDir::new(storage_config.dir))
             .route_layer(middleware::from_fn_with_state(state.clone(), storage_auth))
             .with_state(state.clone());
 

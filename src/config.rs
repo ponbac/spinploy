@@ -37,7 +37,7 @@ impl Config {
         dotenvy::from_filename(".env.local")?;
 
         let config = ConfigBuilder::builder()
-            .add_source(Environment::default())
+            .add_source(Environment::default().separator("__"))
             .build()
             .context("Failed to build configuration")?;
 
