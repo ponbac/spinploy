@@ -42,7 +42,7 @@ async fn storage_auth(
     req: Request<Body>,
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
-    let Some(expected) = state.config.storage_token.as_deref() else {
+    let Some(expected) = state.config.storage.map(|config| config.token) else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
@@ -52,7 +52,7 @@ async fn storage_auth(
         .get(&header_name)
         .and_then(|v| v.to_str().ok());
 
-    if Some(expected) == provided {
+    if Some(expected).as_deref() == provided {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -91,21 +91,17 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
 
-    if let (Some(dir), Some(_token)) = (
-        state.config.storage_dir.clone(),
-        state.config.storage_token.clone(),
-    ) {
+    if let Some(storage_config) = state.config.storage.clone() {
         let storage_router = Router::new()
-            .route_service("/*path", ServeDir::new(dir))
+            .route_service("/*path", ServeDir::new(storage_config.dir))
             .route_layer(middleware::from_fn_with_state(state.clone(), storage_auth))
             .with_state(state.clone());
 
         app = app.nest("/storage", storage_router);
     } else {
         tracing::info!(
-            has_dir = state.config.storage_dir.is_some(),
-            has_token = state.config.storage_token.is_some(),
-            "Storage serving disabled: missing STORAGE_DIR or STORAGE_TOKEN"
+            storage_config = state.config.storage.is_some(),
+            "Storage serving disabled: missing STORAGE_BASE_URL, STORAGE_DIR or STORAGE_TOKEN"
         );
     }
 
@@ -224,8 +220,11 @@ async fn upsert_preview_internal(
             "APP_URL=https://{}\nBACKEND_API_URL=https://{}\nCOOKIE_DOMAIN=.{}",
             frontend_domain, backend_domain, &config.base_domain
         );
-        if let Some(storage_token) = &config.storage_token {
-            env_vars.push_str(&format!("\nSTORAGE_TOKEN={}", storage_token));
+        if let Some(storage_config) = &config.storage {
+            env_vars.push_str(&format!(
+                "\nSTORAGE_TOKEN={}\nSTORAGE_URL={}",
+                storage_config.token, storage_config.base_url
+            ));
         }
 
         dokploy_client

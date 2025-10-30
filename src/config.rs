@@ -21,8 +21,14 @@ pub struct Config {
     pub azdo_repository_id: String,
     pub azdo_pat: String,
     // Optional protected storage settings
-    pub storage_dir: Option<String>,
-    pub storage_token: Option<String>,
+    pub storage: Option<StorageConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct StorageConfig {
+    pub base_url: String,
+    pub dir: String,
+    pub token: String,
 }
 
 impl Config {
