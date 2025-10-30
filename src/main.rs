@@ -220,8 +220,8 @@ async fn upsert_preview_internal(
         let frontend_domain = format!("{}.{}", &identifier, &config.base_domain);
         let backend_domain = format!("api-{}.{}", &identifier, &config.base_domain);
         let env_vars = format!(
-            "APP_URL=https://{}\nBACKEND_API_URL=https://{}\nCOOKIE_DOMAIN=.{}\nBACPAC_URL={}",
-            frontend_domain, backend_domain, &config.base_domain, &config.bacpac_url
+            "APP_URL=https://{}\nBACKEND_API_URL=https://{}\nCOOKIE_DOMAIN=.{}",
+            frontend_domain, backend_domain, &config.base_domain
         );
 
         dokploy_client
