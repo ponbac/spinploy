@@ -219,10 +219,14 @@ async fn upsert_preview_internal(
 
         let frontend_domain = format!("{}.{}", &identifier, &config.base_domain);
         let backend_domain = format!("api-{}.{}", &identifier, &config.base_domain);
-        let env_vars = format!(
+
+        let mut env_vars = format!(
             "APP_URL=https://{}\nBACKEND_API_URL=https://{}\nCOOKIE_DOMAIN=.{}",
             frontend_domain, backend_domain, &config.base_domain
         );
+        if let Some(storage_token) = &config.storage_token {
+            env_vars.push_str(&format!("\nSTORAGE_TOKEN={}", storage_token));
+        }
 
         dokploy_client
             .update_compose(
