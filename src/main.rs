@@ -216,16 +216,29 @@ async fn upsert_preview_internal(
         let frontend_domain = format!("{}.{}", &identifier, &config.base_domain);
         let backend_domain = format!("api-{}.{}", &identifier, &config.base_domain);
 
-        let mut env_vars = format!(
-            "APP_URL=https://{}\nBACKEND_API_URL=https://{}\nCOOKIE_DOMAIN=.{}",
-            frontend_domain, backend_domain, &config.base_domain
+        let dynamic_env_vars = format!(
+            "APP_URL=https://{}\nBACKEND_API_URL=https://{}\n",
+            frontend_domain, backend_domain,
         );
-        if let Some(storage_config) = &config.storage {
-            env_vars.push_str(&format!(
-                "\nSTORAGE_TOKEN={}\nSTORAGE_URL={}",
-                storage_config.token, storage_config.base_url
-            ));
-        }
+        let project_env_vars = r#"
+COOKIE_DOMAIN={{project.COOKIE_DOMAIN}}
+STORAGE_URL={{project.STORAGE_URL}}
+STORAGE_TOKEN={{project.STORAGE_TOKEN}}
+
+EMAIL_INVOICE_CREDENTIALS_PASSWORD={{project.EMAIL_INVOICE_CREDENTIALS_PASSWORD}}
+EMAIL_DIRECT_REGULATION_CREDENTIALS_PASSWORD={{project.EMAIL_DIRECT_REGULATION_CREDENTIALS_PASSWORD}}
+EMAIL_TEST_ANSWER_CREDENTIALS_PASSWORD={{project.EMAIL_TEST_ANSWER_CREDENTIALS_PASSWORD}}
+EMAIL_REFERRAL_CREDENTIALS_PASSWORD={{project.EMAIL_REFERRAL_CREDENTIALS_PASSWORD}}
+
+FEATURE_MANAGEMENT_FREJA_POLLING_JOB={{project.FEATURE_MANAGEMENT_FREJA_POLLING_JOB}}
+FEATURE_MANAGEMENT_VARA_IMPORT_JOB={{project.FEATURE_MANAGEMENT_VARA_IMPORT_JOB}}
+FEATURE_MANAGEMENT_SMS_JOBS={{project.FEATURE_MANAGEMENT_SMS_JOBS}}
+
+SMS_PASSWORD_BASIC_AUTH={{project.SMS_PASSWORD_BASIC_AUTH}}
+SMS_PASSWORD_XML={{project.SMS_PASSWORD_XML}}
+
+VARA_PASSWORD={{project.VARA_PASSWORD}}
+        "#;
 
         dokploy_client
             .update_compose(
@@ -234,7 +247,7 @@ async fn upsert_preview_internal(
                     compose_id: compose.compose_id.clone(),
                     name: identifier.clone(),
                     app_name: app_name.clone(),
-                    env: env_vars,
+                    env: dynamic_env_vars + project_env_vars,
                     environment_id: config.environment_id.clone(),
                     auto_deploy: true,
                     isolated_deployment: true,
