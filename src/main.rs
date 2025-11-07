@@ -217,8 +217,8 @@ async fn upsert_preview_internal(
         let backend_domain = format!("api-{}.{}", &identifier, &config.base_domain);
 
         let dynamic_env_vars = format!(
-            "APP_URL=https://{}\nBACKEND_API_URL=https://{}\n",
-            frontend_domain, backend_domain,
+            "APP_URL=https://{}\nBACKEND_API_URL=https://{}\nEMAIL_ENVIRONMENT_PREFIX=\"[{}] \"\n",
+            frontend_domain, backend_domain, identifier
         );
         let project_env_vars = r#"
 COOKIE_DOMAIN=${{project.COOKIE_DOMAIN}}
