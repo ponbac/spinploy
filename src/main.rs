@@ -3,22 +3,27 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::body::Body;
 use axum::http::request::Parts;
 use axum::http::{HeaderName, Request};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware::{self, Next},
     routing::{delete, get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use spinploy::azure_client::AzureDevOpsClient;
+use spinploy::docker_client::DockerClient;
 use spinploy::models::azure::*;
 use spinploy::{
     Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest, parse_ts,
 };
 use std::future::ready;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt as _;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -30,6 +35,7 @@ struct AppState {
     dokploy_client: Arc<DokployClient>,
     config: Config,
     azure_client: Arc<AzureDevOpsClient>,
+    docker_client: Option<Arc<DockerClient>>,
 }
 
 async fn healthz(State(_state): State<AppState>) -> &'static str {
@@ -72,6 +78,22 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
     let client = DokployClient::new(&config.dokploy_url);
 
+    // Try to connect to Docker socket; if unavailable, log a warning and proceed without it
+    let docker_client = match DockerClient::new() {
+        Ok(dc) => {
+            tracing::info!("Docker client initialized successfully");
+            Some(Arc::new(dc))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Docker client unavailable. Container log streaming will be disabled. \
+                Ensure /var/run/docker.sock is mounted."
+            );
+            None
+        }
+    };
+
     let state = AppState {
         dokploy_client: Arc::new(client),
         azure_client: Arc::new(AzureDevOpsClient::new(
@@ -79,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
             &config.azdo_project,
             &config.azdo_pat,
         )),
+        docker_client,
         config,
     };
 
@@ -88,6 +111,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/previews", delete(delete_preview))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
+        .route("/containers", get(list_containers))
+        .route("/containers/{name}/logs", get(stream_container_logs))
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
 
@@ -412,6 +437,7 @@ async fn azure_pr_comment_webhook(
         dokploy_client,
         config,
         azure_client,
+        ..
     }): State<AppState>,
     ApiKey(api_key): ApiKey,
     Json(payload): Json<AzurePrCommentEvent>,
@@ -552,6 +578,92 @@ async fn azure_pr_updated_webhook(
 
     redeploy_preview_if_exists(&dokploy_client, &api_key, &pr_id, &branch).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// =====================
+// Container Log Endpoints
+// =====================
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    /// Number of lines to return from the end of the logs (default: 100, 0 = all)
+    #[serde(default = "default_tail")]
+    tail: u64,
+    /// Whether to follow the log stream in real-time (default: true)
+    #[serde(default = "default_follow")]
+    follow: bool,
+}
+
+fn default_tail() -> u64 {
+    100
+}
+
+fn default_follow() -> bool {
+    true
+}
+
+/// GET /containers
+/// Lists all containers, optionally filtered by name.
+async fn list_containers(
+    State(state): State<AppState>,
+    ApiKey(_api_key): ApiKey,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let docker = state.docker_client.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Docker client not available. Ensure /var/run/docker.sock is mounted.".to_string(),
+    ))?;
+
+    let name_filter = params.get("name").map(|s| s.as_str());
+    let containers = docker
+        .list_containers(name_filter)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(containers))
+}
+
+/// GET /containers/{name}/logs
+/// Streams container logs as Server-Sent Events (SSE).
+///
+/// Query parameters:
+/// - `tail`: Number of lines to return from the end (default: 100, 0 = all)
+/// - `follow`: Whether to follow logs in real-time (default: true)
+///
+/// Example: GET /containers/my-app/logs?tail=50&follow=true
+async fn stream_container_logs(
+    State(state): State<AppState>,
+    ApiKey(_api_key): ApiKey,
+    Path(container_name): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
+{
+    let docker = state.docker_client.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Docker client not available. Ensure /var/run/docker.sock is mounted.".to_string(),
+    ))?;
+
+    tracing::info!(
+        container = %container_name,
+        tail = query.tail,
+        follow = query.follow,
+        "Starting log stream"
+    );
+
+    let rx = docker
+        .stream_logs(&container_name, query.tail, query.follow)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+
+    let stream = ReceiverStream::new(rx).map(|result| {
+        let event = match result {
+            Ok(line) => Event::default().data(line),
+            Err(e) => Event::default().event("error").data(e),
+        };
+        Ok::<_, std::convert::Infallible>(event)
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn prune_previews_if_over_limit(

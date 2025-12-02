@@ -1,5 +1,6 @@
 pub mod azure_client;
 pub mod config;
+pub mod docker_client;
 pub mod dokploy_client;
 pub mod models;
 pub mod slash_cmd;

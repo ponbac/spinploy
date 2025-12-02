@@ -1,0 +1,19 @@
+meta {
+  name: containers
+  type: http
+  seq: 1
+}
+
+get {
+  url: http://localhost:8080/containers
+  body: none
+  auth: inherit
+}
+
+headers {
+  x-api-key: YOUR_API_KEY
+}
+
+settings {
+  encodeUrl: false
+}
