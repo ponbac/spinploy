@@ -1,10 +1,14 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::collections::HashMap;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::request::Parts;
 use axum::http::{HeaderName, Request};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -21,14 +25,74 @@ use spinploy::models::azure::*;
 use spinploy::{
     Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest, parse_ts,
 };
-use std::future::ready;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::RwLock;
 use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 const PREVIEW_LIMIT: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthDecision {
+    Valid,
+    Invalid,
+}
+
+struct CacheEntry {
+    decision: AuthDecision,
+    expires_at: Instant,
+}
+
+struct AuthCache {
+    entries: RwLock<HashMap<String, CacheEntry>>,
+    ttl: Duration,
+    negative_ttl: Duration,
+    max_keys: usize,
+}
+
+impl AuthCache {
+    fn new(ttl_secs: u64, negative_ttl_secs: u64, max_keys: usize) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::with_capacity(max_keys)),
+            ttl: Duration::from_secs(ttl_secs),
+            negative_ttl: Duration::from_secs(negative_ttl_secs),
+            max_keys,
+        }
+    }
+
+    async fn get(&self, key: &str) -> Option<AuthDecision> {
+        let entries = self.entries.read().await;
+        entries
+            .get(key)
+            .filter(|entry| entry.expires_at > Instant::now())
+            .map(|entry| entry.decision)
+    }
+
+    async fn insert(&self, key: String, decision: AuthDecision) {
+        let mut entries = self.entries.write().await;
+
+        // Simple eviction: if we're at capacity, clear everything to keep it simple
+        // as we don't have a dedicated LRU here and max_keys is usually large.
+        if entries.len() >= self.max_keys {
+            entries.clear();
+        }
+
+        let ttl = match decision {
+            AuthDecision::Valid => self.ttl,
+            AuthDecision::Invalid => self.negative_ttl,
+        };
+
+        entries.insert(
+            key,
+            CacheEntry {
+                decision,
+                expires_at: Instant::now() + ttl,
+            },
+        );
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -36,6 +100,7 @@ struct AppState {
     config: Config,
     azure_client: Arc<AzureDevOpsClient>,
     docker_client: Option<Arc<DockerClient>>,
+    auth_cache: Arc<AuthCache>,
 }
 
 async fn healthz(State(_state): State<AppState>) -> &'static str {
@@ -102,6 +167,11 @@ async fn main() -> anyhow::Result<()> {
             &config.azdo_pat,
         )),
         docker_client,
+        auth_cache: Arc::new(AuthCache::new(
+            config.auth_cache_ttl_secs,
+            config.auth_cache_negative_ttl_secs,
+            1024, // At the moment there will only be one valid key, but could be useful in the future
+        )),
         config,
     };
 
@@ -144,15 +214,12 @@ async fn main() -> anyhow::Result<()> {
 // Extractor to pull API key from `x-api-key` or fallback Basic auth password
 struct ApiKey(String);
 
-impl<S> axum::extract::FromRequestParts<S> for ApiKey
-where
-    S: Send + Sync,
-{
+impl axum::extract::FromRequestParts<AppState> for ApiKey {
     type Rejection = (StatusCode, String);
 
     fn from_request_parts(
         parts: &mut Parts,
-        _state: &S,
+        state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let api_key = parts
             .headers
@@ -182,11 +249,65 @@ where
                     })
             });
 
-        let res = api_key.map(ApiKey).ok_or((
-            StatusCode::BAD_REQUEST,
-            "missing x-api-key or Basic auth password".to_string(),
-        ));
-        ready(res)
+        let state = state.clone();
+
+        async move {
+            let Some(api_key) = api_key else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "missing x-api-key or Basic auth password".to_string(),
+                ));
+            };
+
+            // Check cache first
+            if let Some(decision) = state.auth_cache.get(&api_key).await {
+                return match decision {
+                    AuthDecision::Valid => Ok(ApiKey(api_key)),
+                    AuthDecision::Invalid => {
+                        Err((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))
+                    }
+                };
+            }
+
+            // Validate against Dokploy
+            match state.dokploy_client.fetch_projects(&api_key).await {
+                Ok(_) => {
+                    state
+                        .auth_cache
+                        .insert(api_key.clone(), AuthDecision::Valid)
+                        .await;
+                    Ok(ApiKey(api_key))
+                }
+                Err(e) => {
+                    // Check if it's an auth error (401/403)
+                    let is_auth_error = if let Some(reqwest_err) =
+                        e.downcast_ref::<reqwest::Error>()
+                    {
+                        reqwest_err
+                            .status()
+                            .map(|s| s == StatusCode::UNAUTHORIZED || s == StatusCode::FORBIDDEN)
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if is_auth_error {
+                        state
+                            .auth_cache
+                            .insert(api_key, AuthDecision::Invalid)
+                            .await;
+                        Err((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))
+                    } else {
+                        // Connectivity or other errors - fail closed but don't cache negative decision
+                        tracing::error!(error = %e, "Failed to validate API key against Dokploy");
+                        Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Unable to validate API key with Dokploy at this time".to_string(),
+                        ))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -607,7 +728,7 @@ fn default_follow() -> bool {
 async fn list_containers(
     State(state): State<AppState>,
     ApiKey(_api_key): ApiKey,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let docker = state.docker_client.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,

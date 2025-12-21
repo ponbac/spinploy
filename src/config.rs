@@ -20,8 +20,21 @@ pub struct Config {
     pub azdo_project: String,
     pub azdo_repository_id: String,
     pub azdo_pat: String,
+    // Authentication cache settings
+    #[serde(default = "default_auth_cache_ttl")]
+    pub auth_cache_ttl_secs: u64,
+    #[serde(default = "default_auth_cache_negative_ttl")]
+    pub auth_cache_negative_ttl_secs: u64,
     // Optional protected storage settings
     pub storage: Option<StorageConfig>,
+}
+
+fn default_auth_cache_ttl() -> u64 {
+    60
+}
+
+fn default_auth_cache_negative_ttl() -> u64 {
+    10
 }
 
 #[derive(Debug, Deserialize, Clone)]
