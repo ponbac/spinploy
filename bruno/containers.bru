@@ -5,15 +5,16 @@ meta {
 }
 
 get {
-  url: http://localhost:8080/containers
+  url: https://preview-api.d.bkmn.xyz/containers?name=pr-1991
   body: none
   auth: inherit
 }
 
-headers {
-  x-api-key: YOUR_API_KEY
+params:query {
+  name: pr-1991
 }
 
 settings {
   encodeUrl: false
+  timeout: 0
 }

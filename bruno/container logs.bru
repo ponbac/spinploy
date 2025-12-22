@@ -1,0 +1,21 @@
+meta {
+  name: container logs
+  type: http
+  seq: 3
+}
+
+get {
+  url: https://preview-api.d.bkmn.xyz/containers/preview-pr-1991-yr3iee-frontend-1/logs?tail=50&follow=true
+  body: none
+  auth: inherit
+}
+
+params:query {
+  tail: 50
+  follow: true
+}
+
+settings {
+  encodeUrl: false
+  timeout: 0
+}
