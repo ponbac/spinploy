@@ -25,4 +25,9 @@ RUN apt-get update -y \
     && rm -rf /var/lib/apt/lists/*
 # Copy necessary files from builder
 COPY --from=builder /app/target/release/spinploy spinploy
+
+# NOTE: To enable container log streaming, mount the Docker socket when running:
+#   docker run -v /var/run/docker.sock:/var/run/docker.sock ...
+# Without the socket, the /containers/* endpoints will return 503.
+
 ENTRYPOINT ["./spinploy"]

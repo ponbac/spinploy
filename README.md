@@ -47,7 +47,7 @@ All API endpoints (except `/healthz`) require an API key on each request. Provid
 - `x-api-key: <DOKPLOY_API_KEY>` header, or
 - HTTP Basic auth with the API key as the password (username can be empty).
 
-This API key must be a Dokploy API key with permissions for the target project/environment.
+Spinploy validates this key by making a lightweight request to the Dokploy API. To ensure performance, validation results are cached in memory for a short period (configurable via environment variables).
 
 ### Configuration
 
@@ -68,6 +68,8 @@ This API key must be a Dokploy API key with permissions for the target project/e
 - AZDO_PAT: Azure DevOps Personal Access Token (Code Write to post comments)
 - BIND_ADDR (optional): Server bind address (default `0.0.0.0:8080`)
 - RUST_LOG (optional): Tracing filter (defaults internally to `debug,axum=info,reqwest=info,hyper_util=info`)
+- AUTH_CACHE_TTL_SECS (optional): TTL for successful API key validations (default `60`)
+- AUTH_CACHE_NEGATIVE_TTL_SECS (optional): TTL for failed API key validations (default `10`)
 
 #### Optional: Protected static storage
 

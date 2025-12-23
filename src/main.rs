@@ -1,35 +1,106 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::collections::HashMap;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::request::Parts;
 use axum::http::{HeaderName, Request};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware::{self, Next},
     routing::{delete, get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use spinploy::azure_client::AzureDevOpsClient;
+use spinploy::docker_client::DockerClient;
 use spinploy::models::azure::*;
 use spinploy::{
     Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest, parse_ts,
 };
-use std::future::ready;
+use tokio::sync::RwLock;
+use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 const PREVIEW_LIMIT: usize = 4;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthDecision {
+    Valid,
+    Invalid,
+}
+
+struct CacheEntry {
+    decision: AuthDecision,
+    expires_at: Instant,
+}
+
+struct AuthCache {
+    entries: RwLock<HashMap<String, CacheEntry>>,
+    ttl: Duration,
+    negative_ttl: Duration,
+    max_keys: usize,
+}
+
+impl AuthCache {
+    fn new(ttl_secs: u64, negative_ttl_secs: u64, max_keys: usize) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::with_capacity(max_keys)),
+            ttl: Duration::from_secs(ttl_secs),
+            negative_ttl: Duration::from_secs(negative_ttl_secs),
+            max_keys,
+        }
+    }
+
+    async fn get(&self, key: &str) -> Option<AuthDecision> {
+        let entries = self.entries.read().await;
+        entries
+            .get(key)
+            .filter(|entry| entry.expires_at > Instant::now())
+            .map(|entry| entry.decision)
+    }
+
+    async fn insert(&self, key: String, decision: AuthDecision) {
+        let mut entries = self.entries.write().await;
+
+        // Simple eviction: if we're at capacity, clear everything to keep it simple
+        // as we don't have a dedicated LRU here and max_keys is usually large.
+        if entries.len() >= self.max_keys {
+            entries.clear();
+        }
+
+        let ttl = match decision {
+            AuthDecision::Valid => self.ttl,
+            AuthDecision::Invalid => self.negative_ttl,
+        };
+
+        entries.insert(
+            key,
+            CacheEntry {
+                decision,
+                expires_at: Instant::now() + ttl,
+            },
+        );
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     dokploy_client: Arc<DokployClient>,
     config: Config,
     azure_client: Arc<AzureDevOpsClient>,
+    docker_client: Option<Arc<DockerClient>>,
+    auth_cache: Arc<AuthCache>,
 }
 
 async fn healthz(State(_state): State<AppState>) -> &'static str {
@@ -72,12 +143,34 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
     let client = DokployClient::new(&config.dokploy_url);
 
+    // Try to connect to Docker socket; if unavailable, log a warning and proceed without it
+    let docker_client = match DockerClient::new() {
+        Ok(dc) => {
+            tracing::info!("Docker client initialized successfully");
+            Some(Arc::new(dc))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Docker client unavailable. Container log streaming will be disabled. \
+                Ensure /var/run/docker.sock is mounted."
+            );
+            None
+        }
+    };
+
     let state = AppState {
         dokploy_client: Arc::new(client),
         azure_client: Arc::new(AzureDevOpsClient::new(
             &config.azdo_org,
             &config.azdo_project,
             &config.azdo_pat,
+        )),
+        docker_client,
+        auth_cache: Arc::new(AuthCache::new(
+            config.auth_cache_ttl_secs,
+            config.auth_cache_negative_ttl_secs,
+            1024, // At the moment there will only be one valid key, but could be useful in the future
         )),
         config,
     };
@@ -88,6 +181,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/previews", delete(delete_preview))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
+        .route("/containers", get(list_containers))
+        .route("/containers/{name}/logs", get(stream_container_logs))
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
 
@@ -119,15 +214,12 @@ async fn main() -> anyhow::Result<()> {
 // Extractor to pull API key from `x-api-key` or fallback Basic auth password
 struct ApiKey(String);
 
-impl<S> axum::extract::FromRequestParts<S> for ApiKey
-where
-    S: Send + Sync,
-{
+impl axum::extract::FromRequestParts<AppState> for ApiKey {
     type Rejection = (StatusCode, String);
 
     fn from_request_parts(
         parts: &mut Parts,
-        _state: &S,
+        state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let api_key = parts
             .headers
@@ -157,11 +249,65 @@ where
                     })
             });
 
-        let res = api_key.map(ApiKey).ok_or((
-            StatusCode::BAD_REQUEST,
-            "missing x-api-key or Basic auth password".to_string(),
-        ));
-        ready(res)
+        let state = state.clone();
+
+        async move {
+            let Some(api_key) = api_key else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "missing x-api-key or Basic auth password".to_string(),
+                ));
+            };
+
+            // Check cache first
+            if let Some(decision) = state.auth_cache.get(&api_key).await {
+                return match decision {
+                    AuthDecision::Valid => Ok(ApiKey(api_key)),
+                    AuthDecision::Invalid => {
+                        Err((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))
+                    }
+                };
+            }
+
+            // Validate against Dokploy
+            match state.dokploy_client.fetch_projects(&api_key).await {
+                Ok(_) => {
+                    state
+                        .auth_cache
+                        .insert(api_key.clone(), AuthDecision::Valid)
+                        .await;
+                    Ok(ApiKey(api_key))
+                }
+                Err(e) => {
+                    // Check if it's an auth error (401/403)
+                    let is_auth_error = if let Some(reqwest_err) =
+                        e.downcast_ref::<reqwest::Error>()
+                    {
+                        reqwest_err
+                            .status()
+                            .map(|s| s == StatusCode::UNAUTHORIZED || s == StatusCode::FORBIDDEN)
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if is_auth_error {
+                        state
+                            .auth_cache
+                            .insert(api_key, AuthDecision::Invalid)
+                            .await;
+                        Err((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()))
+                    } else {
+                        // Connectivity or other errors - fail closed but don't cache negative decision
+                        tracing::error!(error = %e, "Failed to validate API key against Dokploy");
+                        Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Unable to validate API key with Dokploy at this time".to_string(),
+                        ))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -412,6 +558,7 @@ async fn azure_pr_comment_webhook(
         dokploy_client,
         config,
         azure_client,
+        ..
     }): State<AppState>,
     ApiKey(api_key): ApiKey,
     Json(payload): Json<AzurePrCommentEvent>,
@@ -552,6 +699,92 @@ async fn azure_pr_updated_webhook(
 
     redeploy_preview_if_exists(&dokploy_client, &api_key, &pr_id, &branch).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// =====================
+// Container Log Endpoints
+// =====================
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    /// Number of lines to return from the end of the logs (default: 100, 0 = all)
+    #[serde(default = "default_tail")]
+    tail: u64,
+    /// Whether to follow the log stream in real-time (default: true)
+    #[serde(default = "default_follow")]
+    follow: bool,
+}
+
+fn default_tail() -> u64 {
+    100
+}
+
+fn default_follow() -> bool {
+    true
+}
+
+/// GET /containers
+/// Lists all containers, optionally filtered by name.
+async fn list_containers(
+    State(state): State<AppState>,
+    ApiKey(_api_key): ApiKey,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let docker = state.docker_client.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Docker client not available. Ensure /var/run/docker.sock is mounted.".to_string(),
+    ))?;
+
+    let name_filter = params.get("name").map(|s| s.as_str());
+    let containers = docker
+        .list_containers(name_filter)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(containers))
+}
+
+/// GET /containers/{name}/logs
+/// Streams container logs as Server-Sent Events (SSE).
+///
+/// Query parameters:
+/// - `tail`: Number of lines to return from the end (default: 100, 0 = all)
+/// - `follow`: Whether to follow logs in real-time (default: true)
+///
+/// Example: GET /containers/my-app/logs?tail=50&follow=true
+async fn stream_container_logs(
+    State(state): State<AppState>,
+    ApiKey(_api_key): ApiKey,
+    Path(container_name): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
+{
+    let docker = state.docker_client.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Docker client not available. Ensure /var/run/docker.sock is mounted.".to_string(),
+    ))?;
+
+    tracing::info!(
+        container = %container_name,
+        tail = query.tail,
+        follow = query.follow,
+        "Starting log stream"
+    );
+
+    let rx = docker
+        .stream_logs(&container_name, query.tail, query.follow)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+
+    let stream = ReceiverStream::new(rx).map(|result| {
+        let event = match result {
+            Ok(line) => Event::default().data(line),
+            Err(e) => Event::default().event("error").data(e),
+        };
+        Ok::<_, std::convert::Infallible>(event)
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn prune_previews_if_over_limit(
