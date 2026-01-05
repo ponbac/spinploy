@@ -803,14 +803,13 @@ async fn prune_previews_if_over_limit(
             let to_delete = total_after_creation - PREVIEW_LIMIT;
 
             // Fetch compose details concurrently
-            let mut detailed =
-                futures::future::join_all(comps.iter().cloned().map(|c| async move {
-                    (
-                        c.clone(),
-                        client.get_compose_detail(api_key, &c.compose_id).await,
-                    )
-                }))
-                .await;
+            let mut detailed = futures::future::join_all(comps.iter().map(|c| async move {
+                (
+                    c.clone(),
+                    client.get_compose_detail(api_key, &c.compose_id).await,
+                )
+            }))
+            .await;
 
             // Sort by latest deployment timestamp (finishedAt -> startedAt -> createdAt), fallback to compose createdAt
             detailed.sort_by_key(|(_c, detail)| {
