@@ -64,3 +64,79 @@ pub struct AzurePrUpdatedResource {
     #[serde(default)]
     pub status: Option<String>,
 }
+
+// Azure DevOps build.completed webhook payload
+#[derive(Debug, Deserialize)]
+pub struct AzureBuildCompletedEvent {
+    #[serde(rename = "eventType")]
+    pub event_type: String,
+    pub resource: AzureBuildResource,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureBuildResource {
+    pub id: u64,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
+// Azure DevOps REST: build detail
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureBuildDetail {
+    pub id: u64,
+    pub source_version: String,
+    #[serde(default)]
+    pub build_number: Option<String>,
+    #[serde(default)]
+    pub repository: Option<AzureBuildRepository>,
+    #[serde(default, rename = "_links")]
+    pub links: Option<AzureBuildLinks>,
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureBuildRepository {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureBuildLinks {
+    #[serde(default)]
+    pub web: Option<AzureHref>,
+}
+
+// Azure DevOps REST: build timeline
+#[derive(Debug, Deserialize)]
+pub struct AzureBuildTimeline {
+    #[serde(default)]
+    pub records: Vec<AzureTimelineRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureTimelineRecord {
+    pub name: String,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default, rename = "type")]
+    pub record_type: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+// Azure DevOps REST: commit detail
+#[derive(Debug, Deserialize)]
+pub struct AzureCommit {
+    pub author: AzureCommitAuthor,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureCommitAuthor {
+    pub name: String,
+    #[serde(default)]
+    pub email: Option<String>,
+}

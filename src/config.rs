@@ -20,6 +20,8 @@ pub struct Config {
     pub azdo_project: String,
     pub azdo_repository_id: String,
     pub azdo_pat: String,
+    // Slack Incoming Webhook URL for alerts
+    pub slack_webhook_url: String,
     // Authentication cache settings
     #[serde(default = "default_auth_cache_ttl")]
     pub auth_cache_ttl_secs: u64,
