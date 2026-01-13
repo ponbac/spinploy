@@ -1,7 +1,9 @@
 use std::time::Duration;
 
+use crate::models::azure::{
+    AzureBuildDetail, AzureBuildListItem, AzureBuildListResponse, AzureBuildTimeline, AzureCommit,
+};
 use anyhow::Result;
-use crate::models::azure::{AzureBuildDetail, AzureBuildTimeline, AzureCommit};
 
 /// Minimal Azure DevOps REST client for posting PR thread comments
 #[derive(Clone, Debug)]
@@ -115,5 +117,37 @@ impl AzureDevOpsClient {
             .await?;
 
         Ok(resp)
+    }
+
+    /// List recent completed builds for a given definition and branch, newest first.
+    pub async fn list_builds(
+        &self,
+        definition_id: u64,
+        branch_name: &str,
+        top: u64,
+    ) -> Result<Vec<AzureBuildListItem>> {
+        let url = format!(
+            "https://dev.azure.com/{}/{}/_apis/build/builds?api-version=7.1-preview.7",
+            self.org, self.project
+        );
+
+        let resp = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .query(&[
+                ("definitions", definition_id.to_string()),
+                ("branchName", branch_name.to_string()),
+                ("statusFilter", "completed".to_string()),
+                ("queryOrder", "finishTimeDescending".to_string()),
+                ("$top", top.to_string()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AzureBuildListResponse>()
+            .await?;
+
+        Ok(resp.value)
     }
 }

@@ -89,6 +89,10 @@ pub struct AzureBuildDetail {
     pub id: u64,
     pub source_version: String,
     #[serde(default)]
+    pub source_branch: Option<String>,
+    #[serde(default)]
+    pub definition: Option<AzureBuildDefinition>,
+    #[serde(default)]
     pub build_number: Option<String>,
     #[serde(default)]
     pub repository: Option<AzureBuildRepository>,
@@ -101,6 +105,14 @@ pub struct AzureBuildDetail {
 #[derive(Debug, Deserialize)]
 pub struct AzureBuildRepository {
     pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureBuildDefinition {
+    pub id: u64,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,4 +151,16 @@ pub struct AzureCommitAuthor {
     pub name: String,
     #[serde(default)]
     pub email: Option<String>,
+}
+
+// Azure DevOps REST: build list (minimal)
+#[derive(Debug, Deserialize)]
+pub struct AzureBuildListResponse {
+    #[serde(default)]
+    pub value: Vec<AzureBuildListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureBuildListItem {
+    pub id: u64,
 }

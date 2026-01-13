@@ -772,6 +772,101 @@ async fn azure_build_completed_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
+    tracing::info!(
+        build_id,
+        build_number = build.build_number.as_deref().unwrap_or(""),
+        "E2E stage failed; checking prior builds for regression"
+    );
+
+    // Helper closures reused below
+    let e2e_failed_in = |tl: &AzureBuildTimeline| {
+        tl.records.iter().any(|r| {
+            r.name == "Run E2E tests"
+                && r.result
+                    .as_deref()
+                    .map(|res| res.eq_ignore_ascii_case("failed"))
+                    .unwrap_or(false)
+        })
+    };
+    let e2e_stage_present =
+        |tl: &AzureBuildTimeline| tl.records.iter().any(|r| r.name == "Run E2E tests");
+
+    // If we cannot check history, proceed to send (per user request).
+    if let (Some(definition_id), Some(branch_name)) = (
+        build.definition.as_ref().map(|d| d.id),
+        build.source_branch.as_deref(),
+    ) {
+        match azure_client
+            .list_builds(definition_id, branch_name, 10)
+            .await
+        {
+            Ok(recent) => {
+                tracing::debug!(
+                    build_id,
+                    definition_id,
+                    branch_name,
+                    recent_count = recent.len(),
+                    "Fetched recent builds for regression check"
+                );
+                for b in recent {
+                    if b.id == build_id {
+                        continue;
+                    }
+                    match azure_client.get_build_timeline(b.id).await {
+                        Ok(prev_tl) => {
+                            if !e2e_stage_present(&prev_tl) {
+                                tracing::debug!(
+                                    build_id,
+                                    prev_build_id = b.id,
+                                    "Previous build missing E2E stage; continuing search"
+                                );
+                                continue;
+                            }
+                            if e2e_failed_in(&prev_tl) {
+                                tracing::info!(
+                                    build_id,
+                                    prev_build_id = b.id,
+                                    "E2E already failing in previous build; suppressing Slack"
+                                );
+                                return Ok(StatusCode::NO_CONTENT.into_response());
+                            }
+                            tracing::info!(
+                                build_id,
+                                prev_build_id = b.id,
+                                "Previous build had E2E stage without failure; treating as new regression"
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                build_id,
+                                prev_build_id = b.id,
+                                "Failed to fetch previous build timeline; continuing search"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    build_id,
+                    definition_id,
+                    branch_name,
+                    "Failed to list builds; proceeding to send Slack"
+                );
+            }
+        }
+    } else {
+        tracing::warn!(
+            build_id,
+            has_definition = build.definition.is_some(),
+            has_branch = build.source_branch.is_some(),
+            "Missing definition or branch; proceeding to send Slack without regression check"
+        );
+    }
+
     let repo_id = build.repository.as_ref().map(|r| r.id.as_str()).ok_or((
         StatusCode::BAD_REQUEST,
         "build missing repository id".to_string(),
