@@ -29,6 +29,7 @@ export AZDO_ORG=your_org
 export AZDO_PROJECT=your_project
 export AZDO_REPOSITORY_ID=00000000-0000-0000-0000-000000000000
 export AZDO_PAT=your_pat_with_code_write
+export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
 
 # Optional
 export BIND_ADDR=0.0.0.0:8080
@@ -66,6 +67,7 @@ Spinploy validates this key by making a lightweight request to the Dokploy API. 
 - AZDO_PROJECT: Azure DevOps project
 - AZDO_REPOSITORY_ID: Azure DevOps repository ID
 - AZDO_PAT: Azure DevOps Personal Access Token (Code Write to post comments)
+- SLACK_WEBHOOK_URL: Slack Incoming Webhook URL (alerts destination channel configured in Slack)
 - BIND_ADDR (optional): Server bind address (default `0.0.0.0:8080`)
 - RUST_LOG (optional): Tracing filter (defaults internally to `debug,axum=info,reqwest=info,hyper_util=info`)
 - AUTH_CACHE_TTL_SECS (optional): TTL for successful API key validations (default `60`)
@@ -106,6 +108,9 @@ curl -H "x-storage-token: $STORAGE_TOKEN" \
 - POST `/webhooks/azure/pr-updated` —
   - Push: redeploy existing preview if present (204 if none)
   - Status change to `completed`: if target branch is `main`, delete preview
+- POST `/webhooks/azure/build-completed` —
+  - Expects Azure DevOps `build.completed` service hook payloads
+  - If the build failed because the stage named `Run E2E tests` failed, posts a Slack Incoming Webhook message including the commit author name and build link
 
 All API calls must include the API key as described in Authentication.
 

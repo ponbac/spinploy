@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+use crate::models::azure::{
+    AzureBuildDetail, AzureBuildListItem, AzureBuildListResponse, AzureBuildTimeline, AzureCommit,
+};
 use anyhow::Result;
 
 /// Minimal Azure DevOps REST client for posting PR thread comments
@@ -54,5 +57,97 @@ impl AzureDevOpsClient {
             .error_for_status()?;
 
         Ok(())
+    }
+
+    /// Fetch build details to obtain sourceVersion, repository id, build number and result.
+    pub async fn get_build(&self, build_id: u64) -> Result<AzureBuildDetail> {
+        let url = format!(
+            "https://dev.azure.com/{}/{}/_apis/build/builds/{}?api-version=7.1-preview.7",
+            self.org, self.project, build_id
+        );
+
+        let resp = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AzureBuildDetail>()
+            .await?;
+
+        Ok(resp)
+    }
+
+    /// Fetch build timeline to inspect stage/job results.
+    pub async fn get_build_timeline(&self, build_id: u64) -> Result<AzureBuildTimeline> {
+        let url = format!(
+            "https://dev.azure.com/{}/{}/_apis/build/builds/{}/timeline?api-version=7.1-preview.2",
+            self.org, self.project, build_id
+        );
+
+        let resp = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AzureBuildTimeline>()
+            .await?;
+
+        Ok(resp)
+    }
+
+    /// Fetch commit details to get commit author information.
+    pub async fn get_commit(&self, repo_id: &str, commit_sha: &str) -> Result<AzureCommit> {
+        let url = format!(
+            "https://dev.azure.com/{}/{}/_apis/git/repositories/{}/commits/{}?api-version=7.1-preview.1",
+            self.org, self.project, repo_id, commit_sha
+        );
+
+        let resp = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AzureCommit>()
+            .await?;
+
+        Ok(resp)
+    }
+
+    /// List recent completed builds for a given definition and branch, newest first.
+    pub async fn list_builds(
+        &self,
+        definition_id: u64,
+        branch_name: &str,
+        top: u64,
+    ) -> Result<Vec<AzureBuildListItem>> {
+        let url = format!(
+            "https://dev.azure.com/{}/{}/_apis/build/builds?api-version=7.1-preview.7",
+            self.org, self.project
+        );
+
+        let resp = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .query(&[
+                ("definitions", definition_id.to_string()),
+                ("branchName", branch_name.to_string()),
+                ("statusFilter", "completed".to_string()),
+                ("queryOrder", "finishTimeDescending".to_string()),
+                ("$top", top.to_string()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AzureBuildListResponse>()
+            .await?;
+
+        Ok(resp.value)
     }
 }

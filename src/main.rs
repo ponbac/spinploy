@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use spinploy::azure_client::AzureDevOpsClient;
 use spinploy::docker_client::DockerClient;
 use spinploy::models::azure::*;
+use spinploy::slack_client::SlackWebhookClient;
 use spinploy::{
     Config, DokployClient, DomainCreateRequest, SlashCommand, UpdateComposeRequest, parse_ts,
 };
@@ -100,6 +101,7 @@ struct AppState {
     config: Config,
     azure_client: Arc<AzureDevOpsClient>,
     docker_client: Option<Arc<DockerClient>>,
+    slack_client: Arc<SlackWebhookClient>,
     auth_cache: Arc<AuthCache>,
 }
 
@@ -167,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
             &config.azdo_pat,
         )),
         docker_client,
+        slack_client: Arc::new(SlackWebhookClient::new(&config.slack_webhook_url)?),
         auth_cache: Arc::new(AuthCache::new(
             config.auth_cache_ttl_secs,
             config.auth_cache_negative_ttl_secs,
@@ -181,6 +184,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/previews", delete(delete_preview))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
+        .route(
+            "/webhooks/azure/build-completed",
+            post(azure_build_completed_webhook),
+        )
         .route("/containers", get(list_containers))
         .route("/containers/{name}/logs", get(stream_container_logs))
         .with_state(state.clone())
@@ -698,6 +705,219 @@ async fn azure_pr_updated_webhook(
     );
 
     redeploy_preview_if_exists(&dokploy_client, &api_key, &pr_id, &branch).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn azure_build_completed_webhook(
+    State(AppState {
+        azure_client,
+        slack_client,
+        ..
+    }): State<AppState>,
+    ApiKey(_api_key): ApiKey,
+    Json(payload): Json<AzureBuildCompletedEvent>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let event_ok = payload.event_type.eq_ignore_ascii_case("build.complete")
+        || payload.event_type.eq_ignore_ascii_case("build.completed");
+    if !event_ok {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    let build_id = payload.resource.id;
+
+    let build = azure_client.get_build(build_id).await.map_err(|e| {
+        tracing::error!(error = %e, build_id, "Failed to fetch build details");
+        (
+            StatusCode::BAD_GATEWAY,
+            "failed to fetch build details".to_string(),
+        )
+    })?;
+
+    let build_failed = payload
+        .resource
+        .result
+        .as_deref()
+        .map(|r| r.eq_ignore_ascii_case("failed"))
+        .unwrap_or(false)
+        || build
+            .result
+            .as_deref()
+            .map(|r| r.eq_ignore_ascii_case("failed"))
+            .unwrap_or(false);
+
+    if !build_failed {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    let timeline = azure_client
+        .get_build_timeline(build_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, build_id, "Failed to fetch build timeline");
+            (
+                StatusCode::BAD_GATEWAY,
+                "failed to fetch build timeline".to_string(),
+            )
+        })?;
+
+    let e2e_failed = timeline.records.iter().any(|r| {
+        r.name == "Run E2E tests"
+            && r.result
+                .as_deref()
+                .map(|res| res.eq_ignore_ascii_case("failed"))
+                .unwrap_or(false)
+    });
+
+    if !e2e_failed {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    tracing::info!(
+        build_id,
+        build_number = build.build_number.as_deref().unwrap_or(""),
+        "E2E stage failed; checking prior builds for regression"
+    );
+
+    // Helper closures reused below
+    let e2e_failed_in = |tl: &AzureBuildTimeline| {
+        tl.records.iter().any(|r| {
+            r.name == "Run E2E tests"
+                && r.result
+                    .as_deref()
+                    .map(|res| res.eq_ignore_ascii_case("failed"))
+                    .unwrap_or(false)
+        })
+    };
+    let e2e_stage_present =
+        |tl: &AzureBuildTimeline| tl.records.iter().any(|r| r.name == "Run E2E tests");
+
+    // If we cannot check history, proceed to send (per user request).
+    if let (Some(definition_id), Some(branch_name)) = (
+        build.definition.as_ref().map(|d| d.id),
+        build.source_branch.as_deref(),
+    ) {
+        match azure_client
+            .list_builds(definition_id, branch_name, 10)
+            .await
+        {
+            Ok(recent) => {
+                tracing::debug!(
+                    build_id,
+                    definition_id,
+                    branch_name,
+                    recent_count = recent.len(),
+                    "Fetched recent builds for regression check"
+                );
+                for b in recent {
+                    if b.id == build_id {
+                        continue;
+                    }
+                    match azure_client.get_build_timeline(b.id).await {
+                        Ok(prev_tl) => {
+                            if !e2e_stage_present(&prev_tl) {
+                                tracing::debug!(
+                                    build_id,
+                                    prev_build_id = b.id,
+                                    "Previous build missing E2E stage; continuing search"
+                                );
+                                continue;
+                            }
+                            if e2e_failed_in(&prev_tl) {
+                                tracing::info!(
+                                    build_id,
+                                    prev_build_id = b.id,
+                                    "E2E already failing in previous build; suppressing Slack"
+                                );
+                                return Ok(StatusCode::NO_CONTENT.into_response());
+                            }
+                            tracing::info!(
+                                build_id,
+                                prev_build_id = b.id,
+                                "Previous build had E2E stage without failure; treating as new regression"
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                build_id,
+                                prev_build_id = b.id,
+                                "Failed to fetch previous build timeline; continuing search"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    build_id,
+                    definition_id,
+                    branch_name,
+                    "Failed to list builds; proceeding to send Slack"
+                );
+            }
+        }
+    } else {
+        tracing::warn!(
+            build_id,
+            has_definition = build.definition.is_some(),
+            has_branch = build.source_branch.is_some(),
+            "Missing definition or branch; proceeding to send Slack without regression check"
+        );
+    }
+
+    let repo_id = build.repository.as_ref().map(|r| r.id.as_str()).ok_or((
+        StatusCode::BAD_REQUEST,
+        "build missing repository id".to_string(),
+    ))?;
+
+    let commit = azure_client
+        .get_commit(repo_id, &build.source_version)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                build_id,
+                repo = repo_id,
+                commit = build.source_version,
+                "Failed to fetch commit details"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                "failed to fetch commit details".to_string(),
+            )
+        })?;
+
+    let build_number = build
+        .build_number
+        .clone()
+        .unwrap_or_else(|| build_id.to_string());
+    let build_link = build
+        .links
+        .as_ref()
+        .and_then(|l| l.web.as_ref())
+        .map(|h| h.href.as_str())
+        .unwrap_or("");
+
+    let mut message = format!(
+        "*:warning: Run E2E tests failed*\n\n• 🏗️ Build: *{}* (ID `{}`)\n• 🧪 Stage: `Run E2E tests`\n• 👤 Commit author: *{}*",
+        build_number, build_id, commit.author.name
+    );
+
+    if !build_link.is_empty() {
+        message.push('\n');
+        message.push_str(&format!("• 🔗 Link: {}", build_link));
+    }
+
+    slack_client.send_text(message).await.map_err(|e| {
+        tracing::error!(error = %e, build_id, "Failed to send Slack webhook");
+        (
+            StatusCode::BAD_GATEWAY,
+            "failed to send Slack notification".to_string(),
+        )
+    })?;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

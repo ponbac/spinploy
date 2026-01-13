@@ -26,3 +26,4 @@ config = "0.15.18"
 base64 = "0.22"
 bollard = "0.18"
 tokio-stream = "0.1"
+slack-morphism = { version = "2.17.0", features = ["hyper"] }

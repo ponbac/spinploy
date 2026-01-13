@@ -3,6 +3,7 @@ pub mod config;
 pub mod docker_client;
 pub mod dokploy_client;
 pub mod models;
+pub mod slack_client;
 pub mod slash_cmd;
 
 pub use config::Config;
