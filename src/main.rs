@@ -901,13 +901,13 @@ async fn azure_build_completed_webhook(
         .unwrap_or("");
 
     let mut message = format!(
-        "Run E2E tests failed in build {} (ID {}). Commit author: {}.",
+        "*:warning: Run E2E tests failed*\n\n• 🏗️ Build: *{}* (ID `{}`)\n• 🧪 Stage: `Run E2E tests`\n• 👤 Commit author: *{}*",
         build_number, build_id, commit.author.name
     );
 
     if !build_link.is_empty() {
-        message.push(' ');
-        message.push_str(build_link);
+        message.push('\n');
+        message.push_str(&format!("• 🔗 Link: {}", build_link));
     }
 
     slack_client.send_text(message).await.map_err(|e| {
