@@ -6,16 +6,34 @@
 
 body {
   @apply m-0;
-  font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu',
-    'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-code {
-  font-family:
-    source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+code,
+.font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-variant-ligatures: none;
+}
+
+/* Custom scrollbar styles */
+.scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+.scrollbar-track-gray-900::-webkit-scrollbar-track {
+  background: rgb(17 24 39);
+}
+
+.scrollbar-thumb-emerald-800::-webkit-scrollbar-thumb {
+  background: rgb(6 95 70);
+  border-radius: 4px;
+}
+
+.scrollbar-thumb-emerald-800::-webkit-scrollbar-thumb:hover {
+  background: rgb(16 185 129);
 }
 
 :root {

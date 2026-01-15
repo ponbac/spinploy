@@ -18,7 +18,6 @@ pub struct Config {
     // Azure DevOps configuration for posting PR comments
     pub azdo_org: String,
     pub azdo_project: String,
-    pub azdo_repo: String,
     pub azdo_repository_id: String,
     pub azdo_pat: String,
     // Slack Incoming Webhook URL for alerts

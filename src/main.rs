@@ -106,7 +106,7 @@ pub struct AppState {
     pub azure_client: Arc<AzureDevOpsClient>,
     pub docker_client: Option<Arc<DockerClient>>,
     pub slack_client: Arc<SlackWebhookClient>,
-    pub auth_cache: Arc<AuthCache>,
+    pub(crate) auth_cache: Arc<AuthCache>,
 }
 
 async fn healthz(State(_state): State<AppState>) -> &'static str {

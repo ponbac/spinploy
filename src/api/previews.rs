@@ -1,13 +1,13 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
-    Json,
 };
 use futures_util::stream::Stream;
 use serde::Deserialize;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::AppState;
 
@@ -49,7 +49,7 @@ fn get_container_name(app_name: &str, service: &str) -> String {
 fn build_pr_url(state: &AppState, pr_id: &str) -> String {
     format!(
         "https://dev.azure.com/{}/{}/_git/{}/pullrequest/{}",
-        state.config.azdo_org, state.config.azdo_project, state.config.azdo_repo, pr_id
+        state.config.azdo_org, state.config.azdo_project, state.config.azdo_repository_id, pr_id
     )
 }
 
@@ -61,9 +61,11 @@ async fn determine_preview_status(
 ) -> PreviewStatus {
     // Check latest deployment
     if let Some(latest_deployment) = compose_detail.deployments.first()
-        && latest_deployment.finished_at.is_none() && latest_deployment.started_at.is_some() {
-            return PreviewStatus::Building;
-        }
+        && latest_deployment.finished_at.is_none()
+        && latest_deployment.started_at.is_some()
+    {
+        return PreviewStatus::Building;
+    }
 
     // Check Docker containers if client available
     if let Some(docker_client) = &state.docker_client {
@@ -190,7 +192,8 @@ pub async fn list_previews(
                         .first()
                         .and_then(|name| {
                             // Extract service name from container name pattern: preview-{id}-{service}-1
-                            let parts: Vec<&str> = name.trim_start_matches('/').split('-').collect();
+                            let parts: Vec<&str> =
+                                name.trim_start_matches('/').split('-').collect();
                             if parts.len() >= 4 {
                                 Some(parts[parts.len() - 2].to_string())
                             } else {
@@ -200,7 +203,12 @@ pub async fn list_previews(
                         .unwrap_or_else(|| "unknown".to_string());
 
                     ContainerSummary {
-                        name: c.names.first().unwrap_or(&c.id).trim_start_matches('/').to_string(),
+                        name: c
+                            .names
+                            .first()
+                            .unwrap_or(&c.id)
+                            .trim_start_matches('/')
+                            .to_string(),
                         service,
                         state: c.state.clone(),
                     }
@@ -279,15 +287,12 @@ pub async fn get_preview_detail(
 
     let status = determine_preview_status(&state, &compose_detail, &compose.app_name).await;
 
-    let last_deployed_at = compose_detail
-        .deployments
-        .first()
-        .and_then(|dep| {
-            dep.finished_at
-                .clone()
-                .or_else(|| dep.started_at.clone())
-                .or_else(|| dep.created_at.clone())
-        });
+    let last_deployed_at = compose_detail.deployments.first().and_then(|dep| {
+        dep.finished_at
+            .clone()
+            .or_else(|| dep.started_at.clone())
+            .or_else(|| dep.created_at.clone())
+    });
 
     // Get domains
     let domains = state
@@ -330,7 +335,12 @@ pub async fn get_preview_detail(
                     .unwrap_or_else(|| "unknown".to_string());
 
                 ContainerSummary {
-                    name: c.names.first().unwrap_or(&c.id).trim_start_matches('/').to_string(),
+                    name: c
+                        .names
+                        .first()
+                        .unwrap_or(&c.id)
+                        .trim_start_matches('/')
+                        .to_string(),
                     service,
                     state: c.state.clone(),
                 }

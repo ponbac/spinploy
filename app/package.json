@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@faker-js/faker": "^10.0.0",
+    "@microsoft/fetch-event-source": "^2.0.1",
     "@tailwindcss/vite": "^4.0.6",
     "@tanstack/match-sorter-utils": "^8.19.4",
     "@tanstack/react-devtools": "^0.7.0",
