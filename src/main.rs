@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::request::Parts;
-use axum::http::{HeaderName, Request};
+use axum::http::{HeaderName, HeaderValue, Request};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
@@ -29,9 +29,13 @@ use spinploy::{
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
-use tower_http::services::ServeDir;
+use tower::ServiceBuilder;
+use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+
+mod api;
 
 const PREVIEW_LIMIT: usize = 3;
 
@@ -96,13 +100,13 @@ impl AuthCache {
 }
 
 #[derive(Clone)]
-struct AppState {
-    dokploy_client: Arc<DokployClient>,
-    config: Config,
-    azure_client: Arc<AzureDevOpsClient>,
-    docker_client: Option<Arc<DockerClient>>,
-    slack_client: Arc<SlackWebhookClient>,
-    auth_cache: Arc<AuthCache>,
+pub struct AppState {
+    pub dokploy_client: Arc<DokployClient>,
+    pub config: Config,
+    pub azure_client: Arc<AzureDevOpsClient>,
+    pub docker_client: Option<Arc<DockerClient>>,
+    pub slack_client: Arc<SlackWebhookClient>,
+    pub auth_cache: Arc<AuthCache>,
 }
 
 async fn healthz(State(_state): State<AppState>) -> &'static str {
@@ -178,6 +182,17 @@ async fn main() -> anyhow::Result<()> {
         config,
     };
 
+    // Frontend serving: index.html with no-cache headers
+    let serve_index = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("cache-control"),
+            HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        ))
+        .service(ServeFile::new("./app/dist/index.html"));
+
+    // Serve static assets from app/dist, fallback to index.html for SPA routing
+    let serve_frontend = ServeDir::new("./app/dist").not_found_service(serve_index);
+
     let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route("/previews", post(create_or_update_preview))
@@ -190,6 +205,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/containers", get(list_containers))
         .route("/containers/{name}/logs", get(stream_container_logs))
+        .nest("/api", api::preview_routes())
+        .fallback_service(serve_frontend)
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
 
@@ -219,7 +236,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // Extractor to pull API key from `x-api-key` or fallback Basic auth password
-struct ApiKey(String);
+pub struct ApiKey(pub String);
 
 impl axum::extract::FromRequestParts<AppState> for ApiKey {
     type Rejection = (StatusCode, String);
