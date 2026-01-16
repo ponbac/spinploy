@@ -29,6 +29,8 @@ pub struct Config {
     pub auth_cache_negative_ttl_secs: u64,
     // Optional protected storage settings
     pub storage: Option<StorageConfig>,
+    // Deployed Preview API path
+    pub deployed_preview_api_path: String,
 }
 
 fn default_auth_cache_ttl() -> u64 {

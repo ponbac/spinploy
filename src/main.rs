@@ -650,7 +650,7 @@ async fn azure_pr_comment_webhook(
                     repo_id,
                     payload.resource.pull_request.pull_request_id,
                     thread_id,
-                    &format!("Preview building, should be available soon: {}", frontend),
+                    &format!("Preview building, should be available soon: {} \n\nView the status of all previews here: {}", frontend, config.deployed_preview_api_path),
                 )
                 .await
             {
