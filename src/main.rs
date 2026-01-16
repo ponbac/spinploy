@@ -667,7 +667,7 @@ async fn azure_pr_comment_webhook(
                     repo_id,
                     payload.resource.pull_request.pull_request_id,
                     thread_id,
-                    "Preview deleted",
+                    "🗑️ Preview deleted",
                 )
                 .await
             {
