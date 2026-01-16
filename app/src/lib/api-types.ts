@@ -24,6 +24,7 @@ export interface PreviewSummary {
 
 export interface DeploymentInfo {
 	deploymentId: string;
+	status: string | null;
 	createdAt: string | null;
 	startedAt: string | null;
 	finishedAt: string | null;

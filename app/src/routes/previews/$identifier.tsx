@@ -217,53 +217,95 @@ function PreviewDetailPage() {
 									</div>
 								) : (
 									<div className="space-y-3">
-										{data.deployments.map((deployment, idx) => (
-											<div
-												key={deployment.deploymentId}
-												className="bg-gray-900 border border-gray-800 p-4"
-											>
-												<div className="flex items-center justify-between mb-2">
-													<div className="font-mono text-sm text-gray-400">
-														#{idx + 1}
-													</div>
-													<div className="font-mono text-xs text-gray-500">
-														{deployment.finishedAt
-															? new Date(deployment.finishedAt).toLocaleString()
-															: deployment.startedAt
-																? "In progress..."
-																: "Queued"}
-													</div>
-												</div>
-												<div className="grid grid-cols-3 gap-4 text-xs">
-													<div>
-														<div className="text-gray-500 mb-1">Duration</div>
-														<div className="font-mono text-gray-300">
-															{formatDuration(deployment.durationSeconds)}
+										{(() => {
+											// Sort by date and assign numbers, then show newest first
+											const getTimestamp = (d: (typeof data.deployments)[0]) =>
+												new Date(
+													d.createdAt || d.startedAt || "1970-01-01",
+												).getTime();
+											const sorted = [...data.deployments].sort(
+												(a, b) => getTimestamp(a) - getTimestamp(b),
+											);
+											const withNumbers = sorted.map((d, i) => ({
+												...d,
+												number: i + 1,
+											}));
+											// Reverse to show newest first
+											return withNumbers.reverse().map((deployment) => {
+												const statusColor =
+													deployment.status === "done"
+														? "text-emerald-400"
+														: deployment.status === "error"
+															? "text-red-400"
+															: deployment.status === "running"
+																? "text-yellow-400"
+																: "text-gray-400";
+												return (
+													<div
+														key={deployment.deploymentId}
+														className="bg-gray-900 border border-gray-800 p-4"
+													>
+														<div className="flex items-center justify-between mb-2">
+															<div className="flex items-center gap-3">
+																<div className="font-mono text-sm text-gray-400">
+																	#{deployment.number}
+																</div>
+																{deployment.status && (
+																	<div
+																		className={`font-mono text-xs font-bold uppercase ${statusColor}`}
+																	>
+																		{deployment.status}
+																	</div>
+																)}
+															</div>
+															<div className="font-mono text-xs text-gray-500">
+																{deployment.finishedAt
+																	? new Date(
+																			deployment.finishedAt,
+																		).toLocaleString()
+																	: deployment.startedAt
+																		? "In progress..."
+																		: "Queued"}
+															</div>
+														</div>
+														<div className="grid grid-cols-3 gap-4 text-xs">
+															<div>
+																<div className="text-gray-500 mb-1">
+																	Duration
+																</div>
+																<div className="font-mono text-gray-300">
+																	{formatDuration(deployment.durationSeconds)}
+																</div>
+															</div>
+															<div>
+																<div className="text-gray-500 mb-1">
+																	Started
+																</div>
+																<div className="font-mono text-gray-300">
+																	{deployment.startedAt
+																		? new Date(
+																				deployment.startedAt,
+																			).toLocaleTimeString()
+																		: "-"}
+																</div>
+															</div>
+															<div>
+																<div className="text-gray-500 mb-1">
+																	Finished
+																</div>
+																<div className="font-mono text-gray-300">
+																	{deployment.finishedAt
+																		? new Date(
+																				deployment.finishedAt,
+																			).toLocaleTimeString()
+																		: "-"}
+																</div>
+															</div>
 														</div>
 													</div>
-													<div>
-														<div className="text-gray-500 mb-1">Started</div>
-														<div className="font-mono text-gray-300">
-															{deployment.startedAt
-																? new Date(
-																		deployment.startedAt,
-																	).toLocaleTimeString()
-																: "-"}
-														</div>
-													</div>
-													<div>
-														<div className="text-gray-500 mb-1">Finished</div>
-														<div className="font-mono text-gray-300">
-															{deployment.finishedAt
-																? new Date(
-																		deployment.finishedAt,
-																	).toLocaleTimeString()
-																: "-"}
-														</div>
-													</div>
-												</div>
-											</div>
-										))}
+												);
+											});
+										})()}
 									</div>
 								)}
 							</div>

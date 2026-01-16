@@ -50,6 +50,7 @@ pub struct ContainerSummary {
 #[serde(rename_all = "camelCase")]
 pub struct DeploymentInfo {
     pub deployment_id: String,
+    pub status: Option<String>,
     pub created_at: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,

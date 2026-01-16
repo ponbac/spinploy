@@ -59,12 +59,22 @@ async fn determine_preview_status(
     compose_detail: &spinploy::models::dokploy::ComposeDetail,
     app_name: &str,
 ) -> PreviewStatus {
-    // Check latest deployment
-    if let Some(latest_deployment) = compose_detail.deployments.first()
-        && latest_deployment.finished_at.is_none()
-        && latest_deployment.started_at.is_some()
-    {
-        return PreviewStatus::Building;
+    // Check latest deployment status first
+    if let Some(latest_deployment) = compose_detail.deployments.first() {
+        // Check deployment status from Dokploy
+        if let Some(status) = &latest_deployment.status {
+            match status.as_str() {
+                "error" => return PreviewStatus::Failed,
+                "running" => return PreviewStatus::Building,
+                "done" => return PreviewStatus::Running,
+                _ => {} // Unknown status, fall through to container check
+            }
+        }
+
+        // Fallback: check timestamps if no status field
+        if latest_deployment.finished_at.is_none() && latest_deployment.started_at.is_some() {
+            return PreviewStatus::Building;
+        }
     }
 
     // Check Docker containers if client available
@@ -359,6 +369,7 @@ pub async fn get_preview_detail(
         .iter()
         .map(|d| DeploymentInfo {
             deployment_id: d.deployment_id.clone(),
+            status: d.status.clone(),
             created_at: d.created_at.clone(),
             started_at: d.started_at.clone(),
             finished_at: d.finished_at.clone(),
