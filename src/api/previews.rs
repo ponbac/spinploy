@@ -388,7 +388,7 @@ pub async fn get_preview_detail(
 
 /// GET /api/previews/{identifier}/containers/{service}/logs - Stream container logs via SSE
 pub async fn stream_preview_container_logs(
-    crate::ApiKey(_api_key): crate::ApiKey,
+    crate::ApiKey(api_key): crate::ApiKey,
     State(state): State<AppState>,
     Path((identifier, service)): Path<(String, String)>,
     Query(params): Query<LogParams>,
@@ -400,11 +400,27 @@ pub async fn stream_preview_container_logs(
         )
     })?;
 
-    // Construct app_name from identifier
-    let app_name = format!("preview-{}", identifier);
+    // Fetch compose to get the actual app_name (includes random suffix from Dokploy)
+    let compose = state
+        .dokploy_client
+        .find_compose_by_name(&api_key, &identifier)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, identifier, "Failed to find compose for logs");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to find preview: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Preview '{}' not found", identifier),
+            )
+        })?;
 
-    // Get container name
-    let container_name = get_container_name(&app_name, &service);
+    // Get container name using actual app_name from Dokploy
+    let container_name = get_container_name(&compose.app_name, &service);
 
     tracing::info!(
         identifier,

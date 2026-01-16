@@ -325,7 +325,7 @@ function PreviewDetailPage() {
         {/* Log Viewer */}
         {selectedService && (
           <div className="mt-6">
-            <LogViewer identifier={identifier} service={selectedService} />
+            <LogViewer key={`${identifier}-${selectedService}`} identifier={identifier} service={selectedService} />
           </div>
         )}
       </div>
