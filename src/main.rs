@@ -33,7 +33,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-const PREVIEW_LIMIT: usize = 4;
+const PREVIEW_LIMIT: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthDecision {
