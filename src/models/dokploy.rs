@@ -101,6 +101,8 @@ pub struct ComposeDeployRequest {
 pub struct Deployment {
     pub deployment_id: String,
     #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub started_at: Option<String>,
