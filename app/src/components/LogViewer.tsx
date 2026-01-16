@@ -2,20 +2,28 @@ import { Pause, Play, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createLogStream, type LogStreamEventSource } from "@/lib/api-client";
 
-interface LogViewerProps {
+const MAX_LOG_LINES = 2500;
+
+type LogEntry = { id: number; text: string };
+
+export default function LogViewer(props: {
 	identifier: string;
 	service: string;
-}
-
-export default function LogViewer({ identifier, service }: LogViewerProps) {
-	const [logs, setLogs] = useState<string[]>([]);
+}) {
+	const [logs, setLogs] = useState<LogEntry[]>([]);
 	const [isPaused, setIsPaused] = useState(false);
 	const [isConnected, setIsConnected] = useState(false);
 	const logEndRef = useRef<HTMLDivElement>(null);
 	const eventSourceRef = useRef<LogStreamEventSource | null>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
+	const isPausedRef = useRef(false);
+	const nextIdRef = useRef(0);
+
+	// Keep ref in sync with state for use in SSE callback
+	isPausedRef.current = isPaused;
 
 	// Auto-scroll to bottom when new logs arrive (unless manually scrolled up)
+	// biome-ignore lint/correctness/useExhaustiveDependencies: logs.length triggers scroll on new logs
 	useEffect(() => {
 		if (!isPaused && logEndRef.current && containerRef.current) {
 			const container = containerRef.current;
@@ -27,11 +35,16 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 				logEndRef.current.scrollIntoView({ behavior: "smooth" });
 			}
 		}
-	}, [isPaused]);
+	}, [isPaused, logs.length]);
 
 	// Connect to SSE stream
 	useEffect(() => {
-		const eventSource = createLogStream(identifier, service, 100, true);
+		const eventSource = createLogStream(
+			props.identifier,
+			props.service,
+			100,
+			true,
+		);
 		eventSourceRef.current = eventSource;
 
 		eventSource.onopen = () => {
@@ -39,8 +52,14 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 		};
 
 		eventSource.onmessage = (event) => {
-			if (!isPaused) {
-				setLogs((prev) => [...prev, event.data]);
+			if (!isPausedRef.current) {
+				const id = nextIdRef.current++;
+				setLogs((prev) => {
+					const next = [...prev, { id, text: event.data }];
+					return next.length > MAX_LOG_LINES
+						? next.slice(-MAX_LOG_LINES)
+						: next;
+				});
 			}
 		};
 
@@ -52,7 +71,7 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 		return () => {
 			eventSource.close();
 		};
-	}, [identifier, service, isPaused]);
+	}, [props.identifier, props.service]);
 
 	const handleClear = () => {
 		setLogs([]);
@@ -61,10 +80,10 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 	return (
 		<div className="bg-gray-950 border-2 border-emerald-500 shadow-[0_0_30px_rgba(16,185,129,0.2)]">
 			{/* Header */}
-			<div className="bg-gradient-to-r from-emerald-950 to-gray-900 border-b-2 border-emerald-500 p-4 flex items-center justify-between">
+			<div className="bg-linear-to-r from-emerald-950 to-gray-900 border-b-2 border-emerald-500 p-4 flex items-center justify-between">
 				<div className="flex items-center gap-4">
 					<h3 className="font-mono text-lg font-bold text-emerald-400 uppercase tracking-wider">
-						[ Container Logs: {service} ]
+						[ Container Logs: {props.service} ]
 					</h3>
 					<div className="flex items-center gap-2">
 						<div
@@ -122,15 +141,17 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 					</div>
 				) : (
 					<div className="space-y-0.5">
-						{logs.map((log, idx) => (
+						{logs.map((entry, idx) => (
 							<div
-								key={`log-${idx}-${log.slice(0, 20)}`}
+								key={entry.id}
 								className="hover:bg-emerald-950/20 leading-relaxed text-emerald-300/90"
 							>
 								<span className="text-gray-600 select-none mr-4">
 									{String(idx + 1).padStart(4, "0")}
 								</span>
-								<span className="whitespace-pre-wrap break-all">{log}</span>
+								<span className="whitespace-pre-wrap break-all">
+									{entry.text}
+								</span>
 							</div>
 						))}
 						<div ref={logEndRef} />

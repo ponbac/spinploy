@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import dayjs from "dayjs";
 import { Clock, Container, ExternalLink, GitBranch } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 import { usePreviewsList } from "@/lib/api-client";
@@ -89,7 +90,9 @@ function PreviewsPage() {
 										</div>
 										<div className="text-xs text-gray-500 font-mono">
 											{preview.lastDeployedAt
-												? new Date(preview.lastDeployedAt).toLocaleString()
+												? dayjs(preview.lastDeployedAt).format(
+														"YYYY-MM-DD HH:mm",
+													)
 												: "Never deployed"}
 										</div>
 									</div>
@@ -144,7 +147,9 @@ function PreviewsPage() {
 													</div>
 													<div className="font-mono text-sm text-gray-400">
 														{preview.createdAt
-															? new Date(preview.createdAt).toLocaleString()
+															? dayjs(preview.createdAt).format(
+																	"YYYY-MM-DD HH:mm",
+																)
 															: "Unknown"}
 													</div>
 												</div>

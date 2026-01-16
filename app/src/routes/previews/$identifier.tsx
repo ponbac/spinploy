@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import dayjs from "dayjs";
 import {
 	Activity,
 	ArrowLeft,
@@ -7,10 +8,11 @@ import {
 	ExternalLink,
 	GitBranch,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import LogViewer from "@/components/LogViewer";
 import StatusBadge from "@/components/StatusBadge";
 import { usePreviewDetail } from "@/lib/api-client";
+import type { DeploymentInfo } from "@/lib/api-types";
 
 export const Route = createFileRoute("/previews/$identifier")({
 	component: PreviewDetailPage,
@@ -27,6 +29,17 @@ function PreviewDetailPage() {
 	const { identifier } = Route.useParams();
 	const { data, isLoading, error } = usePreviewDetail(identifier);
 	const [selectedService, setSelectedService] = useState<string | null>(null);
+
+	const sortedDeployments = useMemo(() => {
+		if (!data?.deployments) return [];
+		const getTimestamp = (d: DeploymentInfo) =>
+			new Date(d.createdAt || d.startedAt || "1970-01-01").getTime();
+		const sorted = [...data.deployments].sort(
+			(a, b) => getTimestamp(a) - getTimestamp(b),
+		);
+		// Add deployment numbers and reverse to show newest first
+		return sorted.map((d, i) => ({ ...d, number: i + 1 })).reverse();
+	}, [data?.deployments]);
 
 	if (isLoading) {
 		return (
@@ -137,7 +150,7 @@ function PreviewDetailPage() {
 										</div>
 										<div className="font-mono text-sm text-gray-400">
 											{data.createdAt
-												? new Date(data.createdAt).toLocaleString()
+												? dayjs(data.createdAt).format("YYYY-MM-DD HH:mm")
 												: "Unknown"}
 										</div>
 									</div>
@@ -152,7 +165,7 @@ function PreviewDetailPage() {
 										</div>
 										<div className="font-mono text-sm text-gray-400">
 											{data.lastDeployedAt
-												? new Date(data.lastDeployedAt).toLocaleString()
+												? dayjs(data.lastDeployedAt).format("YYYY-MM-DD HH:mm")
 												: "Never"}
 										</div>
 									</div>
@@ -211,101 +224,76 @@ function PreviewDetailPage() {
 								</h2>
 							</div>
 							<div className="p-6">
-								{data.deployments.length === 0 ? (
+								{sortedDeployments.length === 0 ? (
 									<div className="text-gray-500 font-mono text-center py-8">
 										No deployments yet
 									</div>
 								) : (
 									<div className="space-y-3">
-										{(() => {
-											// Sort by date and assign numbers, then show newest first
-											const getTimestamp = (d: (typeof data.deployments)[0]) =>
-												new Date(
-													d.createdAt || d.startedAt || "1970-01-01",
-												).getTime();
-											const sorted = [...data.deployments].sort(
-												(a, b) => getTimestamp(a) - getTimestamp(b),
-											);
-											const withNumbers = sorted.map((d, i) => ({
-												...d,
-												number: i + 1,
-											}));
-											// Reverse to show newest first
-											return withNumbers.reverse().map((deployment) => {
-												const statusColor =
-													deployment.status === "done"
-														? "text-emerald-400"
-														: deployment.status === "error"
-															? "text-red-400"
-															: deployment.status === "running"
-																? "text-yellow-400"
-																: "text-gray-400";
-												return (
-													<div
-														key={deployment.deploymentId}
-														className="bg-gray-900 border border-gray-800 p-4"
-													>
-														<div className="flex items-center justify-between mb-2">
-															<div className="flex items-center gap-3">
-																<div className="font-mono text-sm text-gray-400">
-																	#{deployment.number}
-																</div>
-																{deployment.status && (
-																	<div
-																		className={`font-mono text-xs font-bold uppercase ${statusColor}`}
-																	>
-																		{deployment.status}
-																	</div>
-																)}
+										{sortedDeployments.map((deployment) => {
+											const statusColor =
+												deployment.status === "done"
+													? "text-emerald-400"
+													: deployment.status === "error"
+														? "text-red-400"
+														: deployment.status === "running"
+															? "text-yellow-400"
+															: "text-gray-400";
+											return (
+												<div
+													key={deployment.deploymentId}
+													className="bg-gray-900 border border-gray-800 p-4"
+												>
+													<div className="flex items-center justify-between mb-2">
+														<div className="flex items-center gap-3">
+															<div className="font-mono text-sm text-gray-400">
+																#{deployment.number}
 															</div>
-															<div className="font-mono text-xs text-gray-500">
-																{deployment.finishedAt
-																	? new Date(
-																			deployment.finishedAt,
-																		).toLocaleString()
-																	: deployment.startedAt
-																		? "In progress..."
-																		: "Queued"}
+															{deployment.status && (
+																<div
+																	className={`font-mono text-xs font-bold uppercase ${statusColor}`}
+																>
+																	{deployment.status}
+																</div>
+															)}
+														</div>
+														<div className="font-mono text-xs text-gray-500">
+															{deployment.finishedAt
+																? dayjs(deployment.finishedAt).format(
+																		"YYYY-MM-DD HH:mm",
+																	)
+																: deployment.startedAt
+																	? "In progress..."
+																	: "Queued"}
+														</div>
+													</div>
+													<div className="grid grid-cols-3 gap-4 text-xs">
+														<div>
+															<div className="text-gray-500 mb-1">Duration</div>
+															<div className="font-mono text-gray-300">
+																{formatDuration(deployment.durationSeconds)}
 															</div>
 														</div>
-														<div className="grid grid-cols-3 gap-4 text-xs">
-															<div>
-																<div className="text-gray-500 mb-1">
-																	Duration
-																</div>
-																<div className="font-mono text-gray-300">
-																	{formatDuration(deployment.durationSeconds)}
-																</div>
+														<div>
+															<div className="text-gray-500 mb-1">Started</div>
+															<div className="font-mono text-gray-300">
+																{deployment.startedAt
+																	? dayjs(deployment.startedAt).format("HH:mm")
+																	: "-"}
 															</div>
-															<div>
-																<div className="text-gray-500 mb-1">
-																	Started
-																</div>
-																<div className="font-mono text-gray-300">
-																	{deployment.startedAt
-																		? new Date(
-																				deployment.startedAt,
-																			).toLocaleTimeString()
-																		: "-"}
-																</div>
-															</div>
-															<div>
-																<div className="text-gray-500 mb-1">
-																	Finished
-																</div>
-																<div className="font-mono text-gray-300">
-																	{deployment.finishedAt
-																		? new Date(
-																				deployment.finishedAt,
-																			).toLocaleTimeString()
-																		: "-"}
-																</div>
+														</div>
+														<div>
+															<div className="text-gray-500 mb-1">Finished</div>
+															<div className="font-mono text-gray-300">
+																{deployment.finishedAt
+																	? dayjs(deployment.finishedAt).format("HH:mm")
+																	: "-"}
 															</div>
 														</div>
 													</div>
-												);
-											});
-										})()}
+												</div>
+											);
+										})}
 									</div>
 								)}
 							</div>
