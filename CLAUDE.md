@@ -49,6 +49,9 @@ bun run test
 bun run check
 bun run lint
 bun run format
+
+# Fix linting errors and format
+bun run check:fix
 ```
 
 ### Docker
@@ -137,6 +140,7 @@ Bruno API client collection is in `bruno/` directory for manual testing of backe
 **Adding Components**
 
 Use Shadcn CLI to add pre-built components:
+
 ```bash
 pnpm dlx shadcn@latest add button
 ```
