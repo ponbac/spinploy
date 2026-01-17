@@ -46,6 +46,7 @@ bun run build
 bun run test
 
 # Lint and format
+bun run tsc
 bun run check
 bun run lint
 bun run format
@@ -144,6 +145,25 @@ Use Shadcn CLI to add pre-built components:
 ```bash
 pnpm dlx shadcn@latest add button
 ```
+
+**React Components**
+
+- Prefer inline props types for small component interfaces (2-3 fields). Avoid creating separate `interface` or `type` definitions that are only used once.
+- Prefer using `props` directly instead of destructuring in the function signature. This makes it clear what comes from outside the component vs. local variables.
+
+  ```tsx
+  // Preferred: inline props type, using props directly
+  function UserBadge(props: { name: string; isActive: boolean }) {
+    return <span className={props.isActive ? "active" : ""}>{props.name}</span>;
+  }
+
+  // Avoid: destructuring in signature + separate interface for trivial props
+  interface UserBadgeProps {
+    name: string;
+    isActive: boolean;
+  }
+  function UserBadge({ name, isActive }: UserBadgeProps) { ... }
+  ```
 
 ### Preview Deployment Flow
 

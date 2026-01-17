@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import dayjs from "dayjs";
 import { Clock, Container, ExternalLink, GitBranch } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 import { usePreviewsList } from "@/lib/api-client";
@@ -7,25 +8,27 @@ export const Route = createFileRoute("/")({
 	component: PreviewsPage,
 });
 
+const LoadingSkeleton = (
+	<div className="min-h-screen bg-[#0a0a0a] p-8">
+		<div className="max-w-7xl mx-auto">
+			<div className="h-8 w-48 bg-gray-800 animate-pulse mb-8" />
+			<div className="grid grid-cols-1 gap-6">
+				{[1, 2, 3].map((i) => (
+					<div
+						key={i}
+						className="h-48 bg-gray-900 border-2 border-gray-800 animate-pulse"
+					/>
+				))}
+			</div>
+		</div>
+	</div>
+);
+
 function PreviewsPage() {
 	const { data, isLoading, error } = usePreviewsList();
 
 	if (isLoading) {
-		return (
-			<div className="min-h-screen bg-[#0a0a0a] p-8">
-				<div className="max-w-7xl mx-auto">
-					<div className="h-8 w-48 bg-gray-800 animate-pulse mb-8" />
-					<div className="grid grid-cols-1 gap-6">
-						{[1, 2, 3].map((i) => (
-							<div
-								key={i}
-								className="h-48 bg-gray-900 border-2 border-gray-800 animate-pulse"
-							/>
-						))}
-					</div>
-				</div>
-			</div>
-		);
+		return LoadingSkeleton;
 	}
 
 	if (error) {
@@ -89,7 +92,9 @@ function PreviewsPage() {
 										</div>
 										<div className="text-xs text-gray-500 font-mono">
 											{preview.lastDeployedAt
-												? new Date(preview.lastDeployedAt).toLocaleString()
+												? dayjs(preview.lastDeployedAt).format(
+														"YYYY-MM-DD HH:mm",
+													)
 												: "Never deployed"}
 										</div>
 									</div>
@@ -144,7 +149,9 @@ function PreviewsPage() {
 													</div>
 													<div className="font-mono text-sm text-gray-400">
 														{preview.createdAt
-															? new Date(preview.createdAt).toLocaleString()
+															? dayjs(preview.createdAt).format(
+																	"YYYY-MM-DD HH:mm",
+																)
 															: "Unknown"}
 													</div>
 												</div>
