@@ -11,6 +11,7 @@ import { useState } from "react";
 import LogViewer from "@/components/LogViewer";
 import StatusBadge from "@/components/StatusBadge";
 import { usePreviewDetail } from "@/lib/api-client";
+import { formatDateTime, formatTime } from "@/lib/utils";
 
 export const Route = createFileRoute("/previews/$identifier")({
 	component: PreviewDetailPage,
@@ -137,7 +138,7 @@ function PreviewDetailPage() {
 										</div>
 										<div className="font-mono text-sm text-gray-400">
 											{data.createdAt
-												? new Date(data.createdAt).toLocaleString()
+												? formatDateTime(data.createdAt)
 												: "Unknown"}
 										</div>
 									</div>
@@ -152,7 +153,7 @@ function PreviewDetailPage() {
 										</div>
 										<div className="font-mono text-sm text-gray-400">
 											{data.lastDeployedAt
-												? new Date(data.lastDeployedAt).toLocaleString()
+												? formatDateTime(data.lastDeployedAt)
 												: "Never"}
 										</div>
 									</div>
@@ -260,9 +261,7 @@ function PreviewDetailPage() {
 															</div>
 															<div className="font-mono text-xs text-gray-500">
 																{deployment.finishedAt
-																	? new Date(
-																			deployment.finishedAt,
-																		).toLocaleString()
+																	? formatDateTime(deployment.finishedAt)
 																	: deployment.startedAt
 																		? "In progress..."
 																		: "Queued"}
@@ -283,9 +282,7 @@ function PreviewDetailPage() {
 																</div>
 																<div className="font-mono text-gray-300">
 																	{deployment.startedAt
-																		? new Date(
-																				deployment.startedAt,
-																			).toLocaleTimeString()
+																		? formatTime(deployment.startedAt)
 																		: "-"}
 																</div>
 															</div>
@@ -295,9 +292,7 @@ function PreviewDetailPage() {
 																</div>
 																<div className="font-mono text-gray-300">
 																	{deployment.finishedAt
-																		? new Date(
-																				deployment.finishedAt,
-																			).toLocaleTimeString()
+																		? formatTime(deployment.finishedAt)
 																		: "-"}
 																</div>
 															</div>
