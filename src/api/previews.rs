@@ -59,8 +59,8 @@ async fn determine_preview_status(
     compose_detail: &spinploy::models::dokploy::ComposeDetail,
     app_name: &str,
 ) -> PreviewStatus {
-    // Check latest deployment status first
-    if let Some(latest_deployment) = compose_detail.deployments.first() {
+    // Check latest deployment status first (Dokploy returns deployments oldest-first)
+    if let Some(latest_deployment) = compose_detail.deployments.last() {
         // Check deployment status from Dokploy
         if let Some(status) = &latest_deployment.status {
             match status.as_str() {
@@ -162,7 +162,7 @@ pub async fn list_previews(
 
         let last_deployed_at = compose_detail
             .as_ref()
-            .and_then(|d| d.deployments.first())
+            .and_then(|d| d.deployments.last())
             .and_then(|dep| {
                 dep.finished_at
                     .clone()
@@ -297,7 +297,7 @@ pub async fn get_preview_detail(
 
     let status = determine_preview_status(&state, &compose_detail, &compose.app_name).await;
 
-    let last_deployed_at = compose_detail.deployments.first().and_then(|dep| {
+    let last_deployed_at = compose_detail.deployments.last().and_then(|dep| {
         dep.finished_at
             .clone()
             .or_else(|| dep.started_at.clone())
