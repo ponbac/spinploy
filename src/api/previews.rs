@@ -53,16 +53,29 @@ fn build_pr_url(state: &AppState, pr_id: &str) -> String {
     )
 }
 
-/// Fetch PR title from Azure DevOps
+/// Fetch PR title from Azure DevOps (cached for 10 minutes)
 async fn fetch_pr_title(state: &AppState, pr_id: &Option<String>) -> Option<String> {
     let pr_num = pr_id.as_ref()?;
     let pr_id_u64 = pr_num.parse::<u64>().ok()?;
+
+    // Check cache first
+    if let Some(title) = state.pr_title_cache.get(pr_id_u64).await {
+        return Some(title);
+    }
+
+    // Fetch from Azure DevOps
     match state
         .azure_client
         .get_pull_request(&state.config.azdo_repository_id, pr_id_u64)
         .await
     {
-        Ok(pr_detail) => Some(pr_detail.title),
+        Ok(pr_detail) => {
+            state
+                .pr_title_cache
+                .insert(pr_id_u64, pr_detail.title.clone())
+                .await;
+            Some(pr_detail.title)
+        }
         Err(e) => {
             tracing::warn!(error = %e, pr_id = pr_num, "Failed to fetch PR title");
             None

@@ -99,6 +99,38 @@ impl AuthCache {
     }
 }
 
+pub struct PrTitleCache {
+    entries: RwLock<HashMap<u64, (String, Instant)>>,
+    ttl: Duration,
+    max_entries: usize,
+}
+
+impl PrTitleCache {
+    fn new(ttl_secs: u64, max_entries: usize) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::with_capacity(max_entries)),
+            ttl: Duration::from_secs(ttl_secs),
+            max_entries,
+        }
+    }
+
+    pub async fn get(&self, pr_id: u64) -> Option<String> {
+        let entries = self.entries.read().await;
+        entries
+            .get(&pr_id)
+            .filter(|(_, expires_at)| *expires_at > Instant::now())
+            .map(|(title, _)| title.clone())
+    }
+
+    pub async fn insert(&self, pr_id: u64, title: String) {
+        let mut entries = self.entries.write().await;
+        if entries.len() >= self.max_entries {
+            entries.clear();
+        }
+        entries.insert(pr_id, (title, Instant::now() + self.ttl));
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub dokploy_client: Arc<DokployClient>,
@@ -107,6 +139,7 @@ pub struct AppState {
     pub docker_client: Option<Arc<DockerClient>>,
     pub slack_client: Arc<SlackWebhookClient>,
     pub(crate) auth_cache: Arc<AuthCache>,
+    pub pr_title_cache: Arc<PrTitleCache>,
 }
 
 async fn healthz(State(_state): State<AppState>) -> &'static str {
@@ -179,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
             config.auth_cache_negative_ttl_secs,
             1024, // At the moment there will only be one valid key, but could be useful in the future
         )),
+        pr_title_cache: Arc::new(PrTitleCache::new(600, 256)), // 10 minute TTL, max 256 entries
         config,
     };
 
