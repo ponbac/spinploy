@@ -5,9 +5,11 @@ import {
 	Clock,
 	Container,
 	ExternalLink,
+	FileText,
 	GitBranch,
 } from "lucide-react";
 import { useState } from "react";
+import DeploymentLogViewer from "@/components/DeploymentLogViewer";
 import LogViewer from "@/components/LogViewer";
 import StatusBadge from "@/components/StatusBadge";
 import { usePreviewDetail } from "@/lib/api-client";
@@ -28,6 +30,10 @@ function PreviewDetailPage() {
 	const { identifier } = Route.useParams();
 	const { data, isLoading, error } = usePreviewDetail(identifier);
 	const [selectedService, setSelectedService] = useState<string | null>(null);
+	const [selectedDeployment, setSelectedDeployment] = useState<{
+		id: string;
+		number: number;
+	} | null>(null);
 
 	if (isLoading) {
 		return (
@@ -241,10 +247,16 @@ function PreviewDetailPage() {
 															: deployment.status === "running"
 																? "text-yellow-400"
 																: "text-gray-400";
+												const isSelected =
+													selectedDeployment?.id === deployment.deploymentId;
 												return (
 													<div
 														key={deployment.deploymentId}
-														className="bg-gray-900 border border-gray-800 p-4"
+														className={`bg-gray-900 border p-4 ${
+															isSelected
+																? "border-amber-500"
+																: "border-gray-800"
+														}`}
 													>
 														<div className="flex items-center justify-between mb-2">
 															<div className="flex items-center gap-3">
@@ -259,12 +271,38 @@ function PreviewDetailPage() {
 																	</div>
 																)}
 															</div>
-															<div className="font-mono text-xs text-gray-500">
-																{deployment.finishedAt
-																	? formatDateTime(deployment.finishedAt)
-																	: deployment.startedAt
-																		? "In progress..."
-																		: "Queued"}
+															<div className="flex items-center gap-3">
+																{deployment.logPath && (
+																	<button
+																		type="button"
+																		onClick={() =>
+																			setSelectedDeployment(
+																				isSelected
+																					? null
+																					: {
+																							id: deployment.deploymentId,
+																							number: deployment.number,
+																						},
+																			)
+																		}
+																		className={`flex items-center gap-1.5 px-2 py-1 text-xs font-mono transition-colors ${
+																			isSelected
+																				? "bg-amber-500 text-black"
+																				: "bg-gray-800 text-amber-400 hover:bg-gray-700"
+																		}`}
+																		title="View deployment logs"
+																	>
+																		<FileText size={12} />
+																		{isSelected ? "Hide Logs" : "View Logs"}
+																	</button>
+																)}
+																<div className="font-mono text-xs text-gray-500">
+																	{deployment.finishedAt
+																		? formatDateTime(deployment.finishedAt)
+																		: deployment.startedAt
+																			? "In progress..."
+																			: "Queued"}
+																</div>
 															</div>
 														</div>
 														<div className="grid grid-cols-3 gap-4 text-xs">
@@ -360,7 +398,20 @@ function PreviewDetailPage() {
 					</div>
 				</div>
 
-				{/* Log Viewer */}
+				{/* Deployment Log Viewer */}
+				{selectedDeployment && (
+					<div className="mt-6">
+						<DeploymentLogViewer
+							key={`${identifier}-deployment-${selectedDeployment.id}`}
+							identifier={identifier}
+							deploymentId={selectedDeployment.id}
+							deploymentNumber={selectedDeployment.number}
+							onClose={() => setSelectedDeployment(null)}
+						/>
+					</div>
+				)}
+
+				{/* Container Log Viewer */}
 				{selectedService && (
 					<div className="mt-6">
 						<LogViewer

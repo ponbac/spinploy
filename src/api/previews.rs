@@ -374,6 +374,7 @@ pub async fn get_preview_detail(
             started_at: d.started_at.clone(),
             finished_at: d.finished_at.clone(),
             duration_seconds: calculate_duration(&d.started_at, &d.finished_at),
+            log_path: d.log_path.clone(),
         })
         .collect();
 
@@ -448,6 +449,93 @@ pub async fn stream_preview_container_logs(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, container_name, "Failed to stream logs");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to stream logs: {}", e),
+            )
+        })?;
+
+    let stream = ReceiverStream::new(receiver).map(|line_result| {
+        line_result
+            .map(|line| Event::default().data(line))
+            .map_err(|err| err.to_string())
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// GET /api/previews/{identifier}/deployments/{deployment_id}/logs - Stream deployment logs via SSE
+pub async fn stream_deployment_logs(
+    crate::ApiKey(api_key): crate::ApiKey,
+    State(state): State<AppState>,
+    Path((identifier, deployment_id)): Path<(String, String)>,
+) -> Result<Sse<impl Stream<Item = Result<Event, String>>>, (StatusCode, String)> {
+    // Fetch compose to get deployment details
+    let compose = state
+        .dokploy_client
+        .find_compose_by_name(&api_key, &identifier)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, identifier, "Failed to find compose for deployment logs");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to find preview: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Preview '{}' not found", identifier),
+            )
+        })?;
+
+    // Get compose detail to find deployment
+    let compose_detail = state
+        .dokploy_client
+        .get_compose_detail(&api_key, &compose.compose_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, compose_id = &compose.compose_id, "Failed to get compose detail");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get compose details".to_string(),
+            )
+        })?;
+
+    // Find deployment by ID
+    let deployment = compose_detail
+        .deployments
+        .iter()
+        .find(|d| d.deployment_id == deployment_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Deployment '{}' not found", deployment_id),
+            )
+        })?;
+
+    // Get log_path
+    let log_path = deployment.log_path.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "Deployment has no log path".to_string(),
+        )
+    })?;
+
+    tracing::info!(
+        identifier,
+        deployment_id,
+        log_path,
+        "Streaming deployment logs"
+    );
+
+    // Stream logs via Dokploy WebSocket
+    let receiver = state
+        .dokploy_client
+        .stream_deployment_logs(&api_key, log_path)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, log_path, "Failed to stream deployment logs");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to stream logs: {}", e),

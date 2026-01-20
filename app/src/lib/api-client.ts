@@ -107,3 +107,56 @@ export function createLogStream(
 
 	return eventSource;
 }
+
+// SSE deployment log streaming helper
+export function createDeploymentLogStream(
+	identifier: string,
+	deploymentId: string,
+): LogStreamEventSource {
+	const url = new URL(
+		`${API_BASE_URL}/previews/${identifier}/deployments/${deploymentId}/logs`,
+		window.location.origin,
+	);
+
+	const controller = new AbortController();
+	const eventSource: LogStreamEventSource = {
+		close: () => controller.abort(),
+		onopen: null,
+		onmessage: null,
+		onerror: null,
+	};
+
+	const apiKey = getApiKey() || "";
+
+	// Start the fetch-event-source connection
+	fetchEventSource(url.toString(), {
+		headers: {
+			"x-api-key": apiKey,
+		},
+		signal: controller.signal,
+		onopen: async (response) => {
+			if (response.status === 401) {
+				clearApiKey();
+				throw new Error("Unauthorized: Invalid API key");
+			}
+			if (response.ok) {
+				eventSource.onopen?.();
+			} else {
+				throw new Error(`SSE connection failed: ${response.statusText}`);
+			}
+		},
+		onmessage: (event) => {
+			if (event.data) {
+				eventSource.onmessage?.({ data: event.data });
+			}
+		},
+		onerror: () => {
+			eventSource.onerror?.();
+			throw new Error("SSE connection error");
+		},
+	}).catch(() => {
+		// Errors are already handled by onerror callback
+	});
+
+	return eventSource;
+}

@@ -29,6 +29,7 @@ export interface DeploymentInfo {
 	startedAt: string | null;
 	finishedAt: string | null;
 	durationSeconds: number | null;
+	logPath: string | null;
 }
 
 export interface PreviewListResponse {
