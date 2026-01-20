@@ -36,6 +36,15 @@ code,
   background: rgb(16 185 129);
 }
 
+.scrollbar-thumb-amber-800::-webkit-scrollbar-thumb {
+  background: rgb(146 64 14);
+  border-radius: 4px;
+}
+
+.scrollbar-thumb-amber-800::-webkit-scrollbar-thumb:hover {
+  background: rgb(245 158 11);
+}
+
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);

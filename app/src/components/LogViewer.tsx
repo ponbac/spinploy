@@ -1,5 +1,5 @@
-import { Pause, Play, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowDown, Pause, Play, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createLogStream, type LogStreamEventSource } from "@/lib/api-client";
 
 interface LogViewerProps {
@@ -11,23 +11,41 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 	const [logs, setLogs] = useState<string[]>([]);
 	const [isPaused, setIsPaused] = useState(false);
 	const [isConnected, setIsConnected] = useState(false);
+	const [isFollowing, setIsFollowing] = useState(true);
 	const logEndRef = useRef<HTMLDivElement>(null);
 	const eventSourceRef = useRef<LogStreamEventSource | null>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
+	const isPausedRef = useRef(isPaused);
+	isPausedRef.current = isPaused;
+	const isFollowingRef = useRef(isFollowing);
+	isFollowingRef.current = isFollowing;
 
-	// Auto-scroll to bottom when new logs arrive (unless manually scrolled up)
-	useEffect(() => {
-		if (!isPaused && logEndRef.current && containerRef.current) {
-			const container = containerRef.current;
-			const isScrolledToBottom =
-				container.scrollHeight - container.scrollTop <=
-				container.clientHeight + 100;
+	// Handle scroll to detect when user manually scrolls away from bottom
+	const handleScroll = useCallback(() => {
+		if (!containerRef.current) return;
+		const container = containerRef.current;
+		const isAtBottom =
+			container.scrollHeight - container.scrollTop <=
+			container.clientHeight + 100;
 
-			if (isScrolledToBottom) {
-				logEndRef.current.scrollIntoView({ behavior: "smooth" });
-			}
+		// If user scrolls away from bottom, disable follow mode
+		if (!isAtBottom && isFollowingRef.current) {
+			setIsFollowing(false);
 		}
-	}, [isPaused]);
+	}, []);
+
+	// Auto-scroll to bottom when new logs arrive (if following)
+	// biome-ignore lint/correctness/useExhaustiveDependencies: logs.length triggers scroll on new logs
+	useEffect(() => {
+		if (isFollowing && !isPaused && logEndRef.current) {
+			logEndRef.current.scrollIntoView({ behavior: "smooth" });
+		}
+	}, [logs.length, isPaused, isFollowing]);
+
+	const scrollToBottomAndFollow = useCallback(() => {
+		setIsFollowing(true);
+		logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+	}, []);
 
 	// Connect to SSE stream
 	useEffect(() => {
@@ -39,7 +57,7 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 		};
 
 		eventSource.onmessage = (event) => {
-			if (!isPaused) {
+			if (!isPausedRef.current) {
 				setLogs((prev) => [...prev, event.data]);
 			}
 		};
@@ -52,7 +70,7 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 		return () => {
 			eventSource.close();
 		};
-	}, [identifier, service, isPaused]);
+	}, [identifier, service]);
 
 	const handleClear = () => {
 		setLogs([]);
@@ -79,6 +97,25 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 				<div className="flex items-center gap-2">
 					<button
 						type="button"
+						onClick={scrollToBottomAndFollow}
+						className={`p-2 border transition-colors ${
+							isFollowing
+								? "bg-emerald-900 border-emerald-600"
+								: "bg-gray-800 hover:bg-gray-700 border-gray-700"
+						}`}
+						title={
+							isFollowing
+								? "Following (click to scroll to bottom)"
+								: "Scroll to bottom and follow"
+						}
+					>
+						<ArrowDown
+							size={16}
+							className={isFollowing ? "text-emerald-400" : "text-gray-400"}
+						/>
+					</button>
+					<button
+						type="button"
 						onClick={() => setIsPaused(!isPaused)}
 						className="p-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 transition-colors"
 						title={isPaused ? "Resume" : "Pause"}
@@ -103,6 +140,7 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 			{/* Log Content */}
 			<div
 				ref={containerRef}
+				onScroll={handleScroll}
 				className="bg-black p-4 font-mono text-sm h-[600px] overflow-y-auto scrollbar-thin scrollbar-track-gray-900 scrollbar-thumb-emerald-800"
 				style={{
 					backgroundImage: `
@@ -125,7 +163,7 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 						{logs.map((log, idx) => (
 							<div
 								key={`log-${idx}-${log.slice(0, 20)}`}
-								className="hover:bg-emerald-950/20 leading-relaxed text-emerald-300/90"
+								className="[content-visibility:auto] [contain-intrinsic-size:0_24px] hover:bg-emerald-950/20 leading-relaxed text-emerald-300/90"
 							>
 								<span className="text-gray-600 select-none mr-4">
 									{String(idx + 1).padStart(4, "0")}
@@ -143,11 +181,16 @@ export default function LogViewer({ identifier, service }: LogViewerProps) {
 				<div className="text-gray-500">
 					{logs.length} {logs.length === 1 ? "line" : "lines"}
 				</div>
-				{isPaused && (
-					<div className="text-amber-400 font-bold animate-pulse">
-						[ PAUSED ]
-					</div>
-				)}
+				<div className="flex items-center gap-4">
+					{isFollowing && !isPaused && (
+						<div className="text-emerald-400 font-bold">[ FOLLOWING ]</div>
+					)}
+					{isPaused && (
+						<div className="text-amber-400 font-bold animate-pulse">
+							[ PAUSED ]
+						</div>
+					)}
+				</div>
 			</div>
 		</div>
 	);
