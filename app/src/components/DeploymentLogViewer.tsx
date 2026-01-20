@@ -24,6 +24,8 @@ export default function DeploymentLogViewer({
 	const logEndRef = useRef<HTMLDivElement>(null);
 	const eventSourceRef = useRef<LogStreamEventSource | null>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
+	const isPausedRef = useRef(isPaused);
+	isPausedRef.current = isPaused;
 
 	// Auto-scroll to bottom when new logs arrive (unless manually scrolled up)
 	useEffect(() => {
@@ -37,7 +39,7 @@ export default function DeploymentLogViewer({
 				logEndRef.current.scrollIntoView({ behavior: "smooth" });
 			}
 		}
-	}, [isPaused]);
+	}, [logs, isPaused]);
 
 	// Connect to SSE stream
 	useEffect(() => {
@@ -49,7 +51,7 @@ export default function DeploymentLogViewer({
 		};
 
 		eventSource.onmessage = (event) => {
-			if (!isPaused) {
+			if (!isPausedRef.current) {
 				setLogs((prev) => [...prev, event.data]);
 			}
 		};
@@ -62,7 +64,7 @@ export default function DeploymentLogViewer({
 		return () => {
 			eventSource.close();
 		};
-	}, [identifier, deploymentId, isPaused]);
+	}, [identifier, deploymentId]);
 
 	const handleClear = () => {
 		setLogs([]);
