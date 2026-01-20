@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import dayjs from "dayjs";
 import {
 	Activity,
 	ArrowLeft,
@@ -8,7 +9,7 @@ import {
 	FileText,
 	GitBranch,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import DeploymentLogViewer from "@/components/DeploymentLogViewer";
 import LogViewer from "@/components/LogViewer";
 import StatusBadge from "@/components/StatusBadge";
@@ -34,6 +35,23 @@ function PreviewDetailPage() {
 		id: string;
 		number: number;
 	} | null>(null);
+
+	const deploymentsList = useMemo(() => {
+		if (!data?.deployments) return [];
+
+		return data.deployments
+			.toSorted((a, b) => {
+				const timeA = dayjs(
+					a.createdAt || a.startedAt || "1970-01-01",
+				).valueOf();
+				const timeB = dayjs(
+					b.createdAt || b.startedAt || "1970-01-01",
+				).valueOf();
+				return timeA - timeB;
+			})
+			.map((d, i) => ({ ...d, number: i + 1 }))
+			.toReversed();
+	}, [data?.deployments]);
 
 	if (isLoading) {
 		return (
@@ -116,7 +134,7 @@ function PreviewDetailPage() {
 								</div>
 
 								{/* PR Link */}
-								{data.prUrl && (
+								{data.prUrl ? (
 									<div className="flex items-start gap-3">
 										<ExternalLink className="text-cyan-500 mt-1" size={20} />
 										<div>
@@ -133,7 +151,7 @@ function PreviewDetailPage() {
 											</a>
 										</div>
 									</div>
-								)}
+								) : null}
 
 								{/* Created */}
 								<div className="flex items-start gap-3">
@@ -168,7 +186,7 @@ function PreviewDetailPage() {
 						</div>
 
 						{/* URLs Panel */}
-						{(data.frontendUrl || data.backendUrl) && (
+						{data.frontendUrl || data.backendUrl ? (
 							<div className="bg-gray-950 border-2 border-gray-800">
 								<div className="bg-gray-900 border-b-2 border-gray-800 p-4">
 									<h2 className="font-mono text-lg font-bold text-gray-300 uppercase tracking-wider">
@@ -176,7 +194,7 @@ function PreviewDetailPage() {
 									</h2>
 								</div>
 								<div className="p-6 space-y-4">
-									{data.frontendUrl && (
+									{data.frontendUrl ? (
 										<div>
 											<div className="text-xs text-gray-500 uppercase tracking-wider font-mono mb-2">
 												Frontend
@@ -190,8 +208,8 @@ function PreviewDetailPage() {
 												→ {data.frontendUrl}
 											</a>
 										</div>
-									)}
-									{data.backendUrl && (
+									) : null}
+									{data.backendUrl ? (
 										<div>
 											<div className="text-xs text-gray-500 uppercase tracking-wider font-mono mb-2">
 												Backend API
@@ -205,10 +223,10 @@ function PreviewDetailPage() {
 												→ {data.backendUrl}
 											</a>
 										</div>
-									)}
+									) : null}
 								</div>
 							</div>
-						)}
+						) : null}
 
 						{/* Deployment History */}
 						<div className="bg-gray-950 border-2 border-gray-800">
@@ -218,127 +236,104 @@ function PreviewDetailPage() {
 								</h2>
 							</div>
 							<div className="p-6">
-								{data.deployments.length === 0 ? (
+								{deploymentsList.length === 0 ? (
 									<div className="text-gray-500 font-mono text-center py-8">
 										No deployments yet
 									</div>
 								) : (
 									<div className="space-y-3">
-										{(() => {
-											// Sort by date and assign numbers, then show newest first
-											const getTimestamp = (d: (typeof data.deployments)[0]) =>
-												new Date(
-													d.createdAt || d.startedAt || "1970-01-01",
-												).getTime();
-											const sorted = [...data.deployments].sort(
-												(a, b) => getTimestamp(a) - getTimestamp(b),
-											);
-											const withNumbers = sorted.map((d, i) => ({
-												...d,
-												number: i + 1,
-											}));
-											// Reverse to show newest first
-											return withNumbers.reverse().map((deployment) => {
-												const statusColor =
-													deployment.status === "done"
-														? "text-emerald-400"
-														: deployment.status === "error"
-															? "text-red-400"
-															: deployment.status === "running"
-																? "text-yellow-400"
-																: "text-gray-400";
-												const isSelected =
-													selectedDeployment?.id === deployment.deploymentId;
-												return (
-													<div
-														key={deployment.deploymentId}
-														className={`bg-gray-900 border p-4 ${
-															isSelected
-																? "border-amber-500"
-																: "border-gray-800"
-														}`}
-													>
-														<div className="flex items-center justify-between mb-2">
-															<div className="flex items-center gap-3">
-																<div className="font-mono text-sm text-gray-400">
-																	#{deployment.number}
-																</div>
-																{deployment.status && (
-																	<div
-																		className={`font-mono text-xs font-bold uppercase ${statusColor}`}
-																	>
-																		{deployment.status}
-																	</div>
-																)}
+										{deploymentsList.map((deployment) => {
+											const statusColor =
+												deployment.status === "done"
+													? "text-emerald-400"
+													: deployment.status === "error"
+														? "text-red-400"
+														: deployment.status === "running"
+															? "text-yellow-400"
+															: "text-gray-400";
+											const isSelected =
+												selectedDeployment?.id === deployment.deploymentId;
+											return (
+												<div
+													key={deployment.deploymentId}
+													className={`bg-gray-900 border p-4 ${
+														isSelected ? "border-amber-500" : "border-gray-800"
+													}`}
+												>
+													<div className="flex items-center justify-between mb-2">
+														<div className="flex items-center gap-3">
+															<div className="font-mono text-sm text-gray-400">
+																#{deployment.number}
 															</div>
-															<div className="flex items-center gap-3">
-																{deployment.logPath && (
-																	<button
-																		type="button"
-																		onClick={() =>
-																			setSelectedDeployment(
-																				isSelected
-																					? null
-																					: {
-																							id: deployment.deploymentId,
-																							number: deployment.number,
-																						},
-																			)
-																		}
-																		className={`flex items-center gap-1.5 px-2 py-1 text-xs font-mono transition-colors ${
-																			isSelected
-																				? "bg-amber-500 text-black"
-																				: "bg-gray-800 text-amber-400 hover:bg-gray-700"
-																		}`}
-																		title="View deployment logs"
-																	>
-																		<FileText size={12} />
-																		{isSelected ? "Hide Logs" : "View Logs"}
-																	</button>
-																)}
-																<div className="font-mono text-xs text-gray-500">
-																	{deployment.finishedAt
-																		? formatDateTime(deployment.finishedAt)
-																		: deployment.startedAt
-																			? "In progress..."
-																			: "Queued"}
+															{deployment.status ? (
+																<div
+																	className={`font-mono text-xs font-bold uppercase ${statusColor}`}
+																>
+																	{deployment.status}
 																</div>
-															</div>
+															) : null}
 														</div>
-														<div className="grid grid-cols-3 gap-4 text-xs">
-															<div>
-																<div className="text-gray-500 mb-1">
-																	Duration
-																</div>
-																<div className="font-mono text-gray-300">
-																	{formatDuration(deployment.durationSeconds)}
-																</div>
-															</div>
-															<div>
-																<div className="text-gray-500 mb-1">
-																	Started
-																</div>
-																<div className="font-mono text-gray-300">
-																	{deployment.startedAt
-																		? formatTime(deployment.startedAt)
-																		: "-"}
-																</div>
-															</div>
-															<div>
-																<div className="text-gray-500 mb-1">
-																	Finished
-																</div>
-																<div className="font-mono text-gray-300">
-																	{deployment.finishedAt
-																		? formatTime(deployment.finishedAt)
-																		: "-"}
-																</div>
+														<div className="flex items-center gap-3">
+															{deployment.logPath ? (
+																<button
+																	type="button"
+																	onClick={() =>
+																		setSelectedDeployment(
+																			isSelected
+																				? null
+																				: {
+																						id: deployment.deploymentId,
+																						number: deployment.number,
+																					},
+																		)
+																	}
+																	className={`flex items-center gap-1.5 px-2 py-1 text-xs font-mono transition-colors ${
+																		isSelected
+																			? "bg-amber-500 text-black"
+																			: "bg-gray-800 text-amber-400 hover:bg-gray-700"
+																	}`}
+																	title="View deployment logs"
+																>
+																	<FileText size={12} />
+																	{isSelected ? "Hide Logs" : "View Logs"}
+																</button>
+															) : null}
+															<div className="font-mono text-xs text-gray-500">
+																{deployment.finishedAt
+																	? formatDateTime(deployment.finishedAt)
+																	: deployment.startedAt
+																		? "In progress..."
+																		: "Queued"}
 															</div>
 														</div>
 													</div>
-												);
-											});
-										})()}
+													<div className="grid grid-cols-3 gap-4 text-xs">
+														<div>
+															<div className="text-gray-500 mb-1">Duration</div>
+															<div className="font-mono text-gray-300">
+																{formatDuration(deployment.durationSeconds)}
+															</div>
+														</div>
+														<div>
+															<div className="text-gray-500 mb-1">Started</div>
+															<div className="font-mono text-gray-300">
+																{deployment.startedAt
+																	? formatTime(deployment.startedAt)
+																	: "-"}
+															</div>
+														</div>
+														<div>
+															<div className="text-gray-500 mb-1">Finished</div>
+															<div className="font-mono text-gray-300">
+																{deployment.finishedAt
+																	? formatTime(deployment.finishedAt)
+																	: "-"}
+															</div>
+														</div>
+													</div>
+												</div>
+											);
+										})}
 									</div>
 								)}
 							</div>
@@ -399,7 +394,7 @@ function PreviewDetailPage() {
 				</div>
 
 				{/* Deployment Log Viewer */}
-				{selectedDeployment && (
+				{selectedDeployment ? (
 					<div className="mt-6">
 						<DeploymentLogViewer
 							key={`${identifier}-deployment-${selectedDeployment.id}`}
@@ -409,10 +404,10 @@ function PreviewDetailPage() {
 							onClose={() => setSelectedDeployment(null)}
 						/>
 					</div>
-				)}
+				) : null}
 
 				{/* Container Log Viewer */}
-				{selectedService && (
+				{selectedService ? (
 					<div className="mt-6">
 						<LogViewer
 							key={`${identifier}-${selectedService}`}
@@ -420,7 +415,7 @@ function PreviewDetailPage() {
 							service={selectedService}
 						/>
 					</div>
-				)}
+				) : null}
 			</div>
 		</div>
 	);

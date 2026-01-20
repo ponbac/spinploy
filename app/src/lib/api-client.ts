@@ -51,20 +51,7 @@ export interface LogStreamEventSource {
 	onerror: (() => void) | null;
 }
 
-// SSE log streaming helper with authentication support
-export function createLogStream(
-	identifier: string,
-	service: string,
-	tail = 100,
-	follow = true,
-): LogStreamEventSource {
-	const url = new URL(
-		`${API_BASE_URL}/previews/${identifier}/containers/${service}/logs`,
-		window.location.origin,
-	);
-	url.searchParams.set("tail", tail.toString());
-	url.searchParams.set("follow", follow.toString());
-
+function createSSEStream(url: URL): LogStreamEventSource {
 	const controller = new AbortController();
 	const eventSource: LogStreamEventSource = {
 		close: () => controller.abort(),
@@ -75,11 +62,8 @@ export function createLogStream(
 
 	const apiKey = getApiKey() || "";
 
-	// Start the fetch-event-source connection
 	fetchEventSource(url.toString(), {
-		headers: {
-			"x-api-key": apiKey,
-		},
+		headers: { "x-api-key": apiKey },
 		signal: controller.signal,
 		onopen: async (response) => {
 			if (response.status === 401) {
@@ -108,6 +92,23 @@ export function createLogStream(
 	return eventSource;
 }
 
+// SSE log streaming helper with authentication support
+export function createLogStream(
+	identifier: string,
+	service: string,
+	tail = 100,
+	follow = true,
+): LogStreamEventSource {
+	const url = new URL(
+		`${API_BASE_URL}/previews/${identifier}/containers/${service}/logs`,
+		window.location.origin,
+	);
+	url.searchParams.set("tail", tail.toString());
+	url.searchParams.set("follow", follow.toString());
+
+	return createSSEStream(url);
+}
+
 // SSE deployment log streaming helper
 export function createDeploymentLogStream(
 	identifier: string,
@@ -118,45 +119,5 @@ export function createDeploymentLogStream(
 		window.location.origin,
 	);
 
-	const controller = new AbortController();
-	const eventSource: LogStreamEventSource = {
-		close: () => controller.abort(),
-		onopen: null,
-		onmessage: null,
-		onerror: null,
-	};
-
-	const apiKey = getApiKey() || "";
-
-	// Start the fetch-event-source connection
-	fetchEventSource(url.toString(), {
-		headers: {
-			"x-api-key": apiKey,
-		},
-		signal: controller.signal,
-		onopen: async (response) => {
-			if (response.status === 401) {
-				clearApiKey();
-				throw new Error("Unauthorized: Invalid API key");
-			}
-			if (response.ok) {
-				eventSource.onopen?.();
-			} else {
-				throw new Error(`SSE connection failed: ${response.statusText}`);
-			}
-		},
-		onmessage: (event) => {
-			if (event.data) {
-				eventSource.onmessage?.({ data: event.data });
-			}
-		},
-		onerror: () => {
-			eventSource.onerror?.();
-			throw new Error("SSE connection error");
-		},
-	}).catch(() => {
-		// Errors are already handled by onerror callback
-	});
-
-	return eventSource;
+	return createSSEStream(url);
 }

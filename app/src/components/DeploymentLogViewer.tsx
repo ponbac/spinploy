@@ -5,6 +5,8 @@ import {
 	type LogStreamEventSource,
 } from "@/lib/api-client";
 
+const MAX_LOG_LINES = 5000;
+
 interface DeploymentLogViewerProps {
 	identifier: string;
 	deploymentId: string;
@@ -28,6 +30,7 @@ export default function DeploymentLogViewer({
 	isPausedRef.current = isPaused;
 
 	// Auto-scroll to bottom when new logs arrive (unless manually scrolled up)
+	// biome-ignore lint/correctness/useExhaustiveDependencies: logs.length triggers scroll on new logs
 	useEffect(() => {
 		if (!isPaused && logEndRef.current && containerRef.current) {
 			const container = containerRef.current;
@@ -39,7 +42,7 @@ export default function DeploymentLogViewer({
 				logEndRef.current.scrollIntoView({ behavior: "smooth" });
 			}
 		}
-	}, [logs, isPaused]);
+	}, [logs.length, isPaused]);
 
 	// Connect to SSE stream
 	useEffect(() => {
@@ -52,7 +55,12 @@ export default function DeploymentLogViewer({
 
 		eventSource.onmessage = (event) => {
 			if (!isPausedRef.current) {
-				setLogs((prev) => [...prev, event.data]);
+				setLogs((prev) => {
+					const newLogs = [...prev, event.data];
+					return newLogs.length > MAX_LOG_LINES
+						? newLogs.slice(-MAX_LOG_LINES)
+						: newLogs;
+				});
 			}
 		};
 
@@ -163,11 +171,11 @@ export default function DeploymentLogViewer({
 				<div className="text-gray-500">
 					{logs.length} {logs.length === 1 ? "line" : "lines"}
 				</div>
-				{isPaused && (
+				{isPaused ? (
 					<div className="text-amber-400 font-bold animate-pulse">
 						[ PAUSED ]
 					</div>
-				)}
+				) : null}
 			</div>
 		</div>
 	);
