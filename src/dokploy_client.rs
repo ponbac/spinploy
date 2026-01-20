@@ -264,14 +264,13 @@ impl DokployClient {
             ws_url, encoded_log_path
         );
 
-        // Extract host for the Host header (without protocol or path)
+        tracing::debug!(url = %full_url, "Connecting to Dokploy WebSocket");
+
+        // Build request with x-api-key header for authentication
+        // Host header extracted from base URL without protocol or /api path
         let host = base_without_api
             .trim_start_matches("https://")
             .trim_start_matches("http://");
-
-        tracing::info!(url = %full_url, host = %host, log_path = %log_path, "Connecting to Dokploy WebSocket");
-
-        // Build request with x-api-key header for authentication
         let request = WsRequest::builder()
             .uri(&full_url)
             .header("x-api-key", api_key)
@@ -283,14 +282,9 @@ impl DokployClient {
             .body(())
             .context("Failed to build WebSocket request")?;
 
-        let (ws_stream, response) = connect_async(request)
+        let (ws_stream, _) = connect_async(request)
             .await
-            .map_err(|e| {
-                tracing::error!(error = %e, url = %full_url, "WebSocket connection failed");
-                anyhow::anyhow!("Failed to connect to Dokploy WebSocket: {}", e)
-            })?;
-
-        tracing::info!(status = ?response.status(), "WebSocket connected successfully");
+            .context("Failed to connect to Dokploy WebSocket")?;
 
         let (tx, rx) = mpsc::channel(256);
         let (_write, mut read) = ws_stream.split();

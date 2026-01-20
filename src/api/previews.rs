@@ -470,8 +470,6 @@ pub async fn stream_deployment_logs(
     State(state): State<AppState>,
     Path((identifier, deployment_id)): Path<(String, String)>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, String>>>, (StatusCode, String)> {
-    tracing::info!(identifier, deployment_id, "Deployment logs endpoint called");
-
     // Fetch compose to get deployment details
     let compose = state
         .dokploy_client
