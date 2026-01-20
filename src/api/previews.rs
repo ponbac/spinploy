@@ -61,9 +61,9 @@ async fn determine_preview_status(
 ) -> PreviewStatus {
     // Check latest deployment status first (Dokploy returns deployments oldest-first)
     if let Some(latest_deployment) = compose_detail.deployments.last() {
-        // Check deployment status from Dokploy
+        // Check deployment status from Dokploy (case-insensitive)
         if let Some(status) = &latest_deployment.status {
-            match status.as_str() {
+            match status.to_lowercase().as_str() {
                 "error" => return PreviewStatus::Failed,
                 "running" => return PreviewStatus::Building,
                 "done" => return PreviewStatus::Running,
