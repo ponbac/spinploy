@@ -12,6 +12,7 @@ pub struct PreviewSummary {
     pub identifier: String,
     pub compose_id: String,
     pub pr_id: Option<String>,
+    pub pr_title: Option<String>,
     pub branch: String,
     pub status: PreviewStatus,
     pub created_at: Option<String>,

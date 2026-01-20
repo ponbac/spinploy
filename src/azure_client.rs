@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::models::azure::{
     AzureBuildDetail, AzureBuildListItem, AzureBuildListResponse, AzureBuildTimeline, AzureCommit,
+    AzurePullRequestDetail,
 };
 use anyhow::Result;
 
@@ -149,5 +150,29 @@ impl AzureDevOpsClient {
             .await?;
 
         Ok(resp.value)
+    }
+
+    /// Fetch pull request details to get title.
+    pub async fn get_pull_request(
+        &self,
+        repo_id: &str,
+        pr_id: u64,
+    ) -> Result<AzurePullRequestDetail> {
+        let url = format!(
+            "https://dev.azure.com/{}/{}/_apis/git/repositories/{}/pullRequests/{}?api-version=7.1-preview.1",
+            self.org, self.project, repo_id, pr_id
+        );
+
+        let resp = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AzurePullRequestDetail>()
+            .await?;
+
+        Ok(resp)
     }
 }

@@ -83,9 +83,20 @@ function PreviewsPage() {
 									{/* Top Bar */}
 									<div className="bg-gray-900 border-b-2 border-gray-800 p-4 flex items-center justify-between">
 										<div className="flex items-center gap-4">
-											<div className="font-mono text-xl font-bold text-emerald-400 tracking-tight">
-												{preview.identifier}
-											</div>
+											{preview.prTitle ? (
+												<>
+													<div className="font-mono text-xl font-bold text-gray-100 tracking-tight">
+														{preview.prTitle}
+													</div>
+													<div className="font-mono text-sm font-medium text-emerald-400 bg-emerald-950/50 px-2 py-0.5 border border-emerald-500/30">
+														{preview.identifier}
+													</div>
+												</>
+											) : (
+												<div className="font-mono text-xl font-bold text-emerald-400 tracking-tight">
+													{preview.identifier}
+												</div>
+											)}
 											<StatusBadge status={preview.status} />
 										</div>
 										<div className="text-xs text-gray-500 font-mono">

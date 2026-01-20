@@ -326,6 +326,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires environment variables
     async fn test_find_compose_id() {
         let (client, api_key) = client_with_api_key();
 

@@ -97,9 +97,20 @@ function PreviewDetailPage() {
 					</Link>
 					<div className="flex items-baseline justify-between flex-wrap gap-4">
 						<div className="flex items-baseline gap-4">
-							<h1 className="text-5xl font-black tracking-tighter font-mono text-emerald-400">
-								{data.identifier}
-							</h1>
+							{data.prTitle ? (
+								<div className="flex flex-col gap-1">
+									<h1 className="text-4xl font-black tracking-tighter font-mono text-gray-100">
+										{data.prTitle}
+									</h1>
+									<div className="font-mono text-lg font-medium text-emerald-400">
+										{data.identifier}
+									</div>
+								</div>
+							) : (
+								<h1 className="text-5xl font-black tracking-tighter font-mono text-emerald-400">
+									{data.identifier}
+								</h1>
+							)}
 							<StatusBadge status={data.status} />
 						</div>
 					</div>
