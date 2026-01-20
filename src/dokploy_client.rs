@@ -252,9 +252,9 @@ impl DokployClient {
         api_key: &str,
         log_path: &str,
     ) -> Result<mpsc::Receiver<Result<String, String>>> {
-        // Convert HTTP URL to WebSocket URL
-        let ws_url = self
-            .base_url
+        // Convert HTTP URL to WebSocket URL, stripping /api suffix since WebSocket is at root
+        let base_without_api = self.base_url.trim_end_matches("/api").trim_end_matches("/");
+        let ws_url = base_without_api
             .replace("https://", "wss://")
             .replace("http://", "ws://");
 
@@ -264,13 +264,18 @@ impl DokployClient {
             ws_url, encoded_log_path
         );
 
-        tracing::debug!(url = %full_url, "Connecting to Dokploy WebSocket");
+        // Extract host for the Host header (without protocol or path)
+        let host = base_without_api
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+
+        tracing::info!(url = %full_url, host = %host, log_path = %log_path, "Connecting to Dokploy WebSocket");
 
         // Build request with x-api-key header for authentication
         let request = WsRequest::builder()
             .uri(&full_url)
             .header("x-api-key", api_key)
-            .header("Host", self.base_url.trim_start_matches("https://").trim_start_matches("http://"))
+            .header("Host", host)
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
@@ -278,9 +283,14 @@ impl DokployClient {
             .body(())
             .context("Failed to build WebSocket request")?;
 
-        let (ws_stream, _) = connect_async(request)
+        let (ws_stream, response) = connect_async(request)
             .await
-            .context("Failed to connect to Dokploy WebSocket")?;
+            .map_err(|e| {
+                tracing::error!(error = %e, url = %full_url, "WebSocket connection failed");
+                anyhow::anyhow!("Failed to connect to Dokploy WebSocket: {}", e)
+            })?;
+
+        tracing::info!(status = ?response.status(), "WebSocket connected successfully");
 
         let (tx, rx) = mpsc::channel(256);
         let (_write, mut read) = ws_stream.split();
