@@ -164,3 +164,9 @@ pub struct AzureBuildListResponse {
 pub struct AzureBuildListItem {
     pub id: u64,
 }
+
+// Azure DevOps REST: pull request detail
+#[derive(Debug, Deserialize)]
+pub struct AzurePullRequestDetail {
+    pub title: String,
+}

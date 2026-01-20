@@ -12,6 +12,7 @@ export interface PreviewSummary {
 	identifier: string;
 	composeId: string;
 	prId: string | null;
+	prTitle: string | null;
 	branch: string;
 	status: PreviewStatus;
 	createdAt: string | null;
