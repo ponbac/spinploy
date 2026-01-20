@@ -227,19 +227,21 @@ async fn main() -> anyhow::Result<()> {
     // Serve static assets from app/dist, fallback to index.html for SPA routing
     let serve_frontend = ServeDir::new("./app/dist").not_found_service(serve_index);
 
-    let mut app = Router::new()
-        .route("/healthz", get(healthz))
+    let api_routes = api::preview_routes()
         .route("/previews", post(create_or_update_preview))
         .route("/previews", delete(delete_preview))
+        .route("/containers", get(list_containers))
+        .route("/containers/{name}/logs", get(stream_container_logs));
+
+    let mut app = Router::new()
+        .route("/healthz", get(healthz))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
         .route(
             "/webhooks/azure/build-completed",
             post(azure_build_completed_webhook),
         )
-        .route("/containers", get(list_containers))
-        .route("/containers/{name}/logs", get(stream_container_logs))
-        .nest("/api", api::preview_routes())
+        .nest("/api", api_routes)
         .fallback_service(serve_frontend)
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
