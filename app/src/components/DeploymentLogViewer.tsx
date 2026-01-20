@@ -31,9 +31,12 @@ export default function DeploymentLogViewer({
 	isPausedRef.current = isPaused;
 	const isFollowingRef = useRef(isFollowing);
 	isFollowingRef.current = isFollowing;
+	const isProgrammaticScroll = useRef(false);
 
 	// Handle scroll to detect when user manually scrolls away from bottom
 	const handleScroll = useCallback(() => {
+		// Ignore scroll events during programmatic scrolling
+		if (isProgrammaticScroll.current) return;
 		if (!containerRef.current) return;
 		const container = containerRef.current;
 		const isAtBottom =
@@ -50,13 +53,23 @@ export default function DeploymentLogViewer({
 	// biome-ignore lint/correctness/useExhaustiveDependencies: logs.length triggers scroll on new logs
 	useEffect(() => {
 		if (isFollowing && !isPaused && logEndRef.current) {
+			isProgrammaticScroll.current = true;
 			logEndRef.current.scrollIntoView({ behavior: "smooth" });
+			// Reset flag after scroll animation completes
+			setTimeout(() => {
+				isProgrammaticScroll.current = false;
+			}, 500);
 		}
 	}, [logs.length, isPaused, isFollowing]);
 
 	const scrollToBottomAndFollow = useCallback(() => {
 		setIsFollowing(true);
+		isProgrammaticScroll.current = true;
 		logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+		// Reset flag after scroll animation completes
+		setTimeout(() => {
+			isProgrammaticScroll.current = false;
+		}, 500);
 	}, []);
 
 	// Connect to SSE stream
