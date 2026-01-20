@@ -59,8 +59,18 @@ async fn determine_preview_status(
     compose_detail: &spinploy::models::dokploy::ComposeDetail,
     app_name: &str,
 ) -> PreviewStatus {
-    // Check latest deployment status first (Dokploy returns deployments oldest-first)
-    if let Some(latest_deployment) = compose_detail.deployments.last() {
+    // Find the latest deployment by timestamp (Dokploy doesn't guarantee order)
+    let latest_deployment = compose_detail
+        .deployments
+        .iter()
+        .max_by_key(|d| {
+            d.finished_at
+                .as_ref()
+                .or(d.started_at.as_ref())
+                .or(d.created_at.as_ref())
+        });
+
+    if let Some(latest_deployment) = latest_deployment {
         // Check deployment status from Dokploy (case-insensitive)
         if let Some(status) = &latest_deployment.status {
             match status.to_lowercase().as_str() {
