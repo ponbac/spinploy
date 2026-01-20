@@ -26,4 +26,6 @@ config = "0.15.18"
 base64 = "0.22"
 bollard = "0.18"
 tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+urlencoding = "2.1"
 slack-morphism = { version = "2.17.0", features = ["hyper"] }

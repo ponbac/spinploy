@@ -5,8 +5,11 @@ use crate::models::dokploy::{
     Domain, DomainCreateRequest, Project, UpdateComposeRequest,
 };
 use anyhow::{Context, Result, bail};
+use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
+use tokio::sync::mpsc;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 // keep client lean; avoid verbose tracing here
 
 /// Lightweight wrapper around the Dokploy API using manual reqwest calls.
@@ -237,6 +240,58 @@ impl DokployClient {
     ) -> Result<ComposeDetail> {
         let url = format!("compose.one?composeId={}", compose_id);
         self.get::<ComposeDetail>(api_key, &url).await
+    }
+
+    /// Stream deployment logs via WebSocket connection to Dokploy.
+    /// Returns a receiver that yields log lines.
+    pub async fn stream_deployment_logs(
+        &self,
+        api_key: &str,
+        log_path: &str,
+    ) -> Result<mpsc::Receiver<Result<String, String>>> {
+        // Convert HTTP URL to WebSocket URL
+        let ws_url = self
+            .base_url
+            .replace("https://", "wss://")
+            .replace("http://", "ws://");
+
+        let encoded_log_path = urlencoding::encode(log_path);
+        let full_url = format!(
+            "{}/listen-deployment?logPath={}&token={}",
+            ws_url, encoded_log_path, api_key
+        );
+
+        tracing::debug!(url = %full_url, "Connecting to Dokploy WebSocket");
+
+        let (ws_stream, _) = connect_async(&full_url)
+            .await
+            .context("Failed to connect to Dokploy WebSocket")?;
+
+        let (tx, rx) = mpsc::channel(256);
+        let (_write, mut read) = ws_stream.split();
+
+        // Spawn task to read from WebSocket and forward to channel
+        tokio::spawn(async move {
+            while let Some(msg_result) = read.next().await {
+                match msg_result {
+                    Ok(Message::Text(text)) => {
+                        if tx.send(Ok(text.to_string())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) => {
+                        break;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string())).await;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        Ok(rx)
     }
 }
 

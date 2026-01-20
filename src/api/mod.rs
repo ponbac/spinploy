@@ -17,4 +17,8 @@ pub fn preview_routes() -> Router<AppState> {
             "/previews/{identifier}/containers/{service}/logs",
             get(previews::stream_preview_container_logs),
         )
+        .route(
+            "/previews/{identifier}/deployments/{deployment_id}/logs",
+            get(previews::stream_deployment_logs),
+        )
 }

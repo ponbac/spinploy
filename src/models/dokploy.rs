@@ -108,6 +108,8 @@ pub struct Deployment {
     pub started_at: Option<String>,
     #[serde(default)]
     pub finished_at: Option<String>,
+    #[serde(default)]
+    pub log_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

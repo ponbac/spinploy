@@ -55,4 +55,5 @@ pub struct DeploymentInfo {
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub duration_seconds: Option<u64>,
+    pub log_path: Option<String>,
 }
