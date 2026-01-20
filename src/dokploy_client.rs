@@ -9,7 +9,10 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{http::Request as WsRequest, Message},
+};
 // keep client lean; avoid verbose tracing here
 
 /// Lightweight wrapper around the Dokploy API using manual reqwest calls.
@@ -257,13 +260,25 @@ impl DokployClient {
 
         let encoded_log_path = urlencoding::encode(log_path);
         let full_url = format!(
-            "{}/listen-deployment?logPath={}&token={}",
-            ws_url, encoded_log_path, api_key
+            "{}/listen-deployment?logPath={}",
+            ws_url, encoded_log_path
         );
 
         tracing::debug!(url = %full_url, "Connecting to Dokploy WebSocket");
 
-        let (ws_stream, _) = connect_async(&full_url)
+        // Build request with x-api-key header for authentication
+        let request = WsRequest::builder()
+            .uri(&full_url)
+            .header("x-api-key", api_key)
+            .header("Host", self.base_url.trim_start_matches("https://").trim_start_matches("http://"))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+            .body(())
+            .context("Failed to build WebSocket request")?;
+
+        let (ws_stream, _) = connect_async(request)
             .await
             .context("Failed to connect to Dokploy WebSocket")?;
 
