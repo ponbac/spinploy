@@ -41,14 +41,19 @@ const PREVIEW_LIMIT: usize = 3;
 const LEGACY_E2E_RUN_NAME: &str = "Run E2E tests";
 const MAIN_E2E_RUN_NAME: &str = "Run main E2E tests";
 const JOURNAL_TEMPLATE_E2E_RUN_NAME: &str = "Run journal template E2E tests";
+const TRACKED_E2E_RUN_NAMES: [&str; 3] = [
+    LEGACY_E2E_RUN_NAME,
+    MAIN_E2E_RUN_NAME,
+    JOURNAL_TEMPLATE_E2E_RUN_NAME,
+];
+
+type TrackedE2eRuns = BTreeSet<&'static str>;
 
 fn tracked_e2e_run_name(name: &str) -> Option<&'static str> {
-    match name {
-        LEGACY_E2E_RUN_NAME => Some(LEGACY_E2E_RUN_NAME),
-        MAIN_E2E_RUN_NAME => Some(MAIN_E2E_RUN_NAME),
-        JOURNAL_TEMPLATE_E2E_RUN_NAME => Some(JOURNAL_TEMPLATE_E2E_RUN_NAME),
-        _ => None,
-    }
+    TRACKED_E2E_RUN_NAMES
+        .iter()
+        .copied()
+        .find(|tracked_name| *tracked_name == name)
 }
 
 fn is_failed_result(result: Option<&str>) -> bool {
@@ -57,7 +62,7 @@ fn is_failed_result(result: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-fn failed_e2e_run_names(timeline: &AzureBuildTimeline) -> BTreeSet<&'static str> {
+fn failed_e2e_run_names(timeline: &AzureBuildTimeline) -> TrackedE2eRuns {
     timeline
         .records
         .iter()
@@ -73,6 +78,15 @@ fn has_tracked_e2e_runs(timeline: &AzureBuildTimeline) -> bool {
         .records
         .iter()
         .any(|record| tracked_e2e_run_name(&record.name).is_some())
+}
+
+fn format_tracked_e2e_runs(runs: &TrackedE2eRuns) -> String {
+    TRACKED_E2E_RUN_NAMES
+        .iter()
+        .copied()
+        .filter(|run_name| runs.contains(run_name))
+        .collect::<Vec<_>>()
+        .join("`, `")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -980,15 +994,12 @@ async fn azure_build_completed_webhook(
         .map(|h| h.href.as_str())
         .unwrap_or("");
 
-    let failed_run_list = failed_e2e_runs
-        .iter()
-        .copied()
-        .collect::<Vec<_>>()
-        .join("`, `");
-
     let mut message = format!(
         "*:warning: Playwright E2E failed*\n\n• 🏗️ Build: *{}* (ID `{}`)\n• 🧪 Stage: `Playwright E2E Tests`\n• ▶️ Failed runs: `{}`\n• 👤 Commit author: *{}*",
-        build_number, build_id, failed_run_list, commit.author.name
+        build_number,
+        build_id,
+        format_tracked_e2e_runs(&failed_e2e_runs),
+        commit.author.name
     );
 
     if !build_link.is_empty() {
@@ -1204,6 +1215,16 @@ mod tests {
         assert_eq!(
             failed,
             BTreeSet::from([LEGACY_E2E_RUN_NAME, MAIN_E2E_RUN_NAME])
+        );
+    }
+
+    #[test]
+    fn formats_failed_runs_in_tracked_order() {
+        let runs = BTreeSet::from([JOURNAL_TEMPLATE_E2E_RUN_NAME, MAIN_E2E_RUN_NAME]);
+
+        assert_eq!(
+            format_tracked_e2e_runs(&runs),
+            "Run main E2E tests`, `Run journal template E2E tests"
         );
     }
 
