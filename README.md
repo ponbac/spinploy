@@ -110,7 +110,7 @@ curl -H "x-storage-token: $STORAGE_TOKEN" \
   - Status change to `completed`: if target branch is `main`, delete preview
 - POST `/webhooks/azure/build-completed` —
   - Expects Azure DevOps `build.completed` service hook payloads
-  - If the build failed because the stage named `Run E2E tests` failed, posts a Slack Incoming Webhook message including the commit author name and build link
+  - If the build failed because one or more tracked Playwright E2E runs failed (`Run main E2E tests`, `Run journal template E2E tests`; legacy `Run E2E tests` also supported), posts a Slack Incoming Webhook message including the commit author name and build link
 
 All API calls must include the API key as described in Authentication.
 

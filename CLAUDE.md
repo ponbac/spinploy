@@ -175,7 +175,7 @@ Dynamic environment variables (per-preview) are prefixed directly, while project
 
 **Build Completed** (`/webhooks/azure/build-completed`)
 
-- Detects E2E stage failures (`Run E2E tests`)
+- Detects tracked Playwright E2E run failures (`Run main E2E tests`, `Run journal template E2E tests`; legacy `Run E2E tests` still supported)
 - Checks recent build history to suppress duplicate alerts
 - Fetches commit author and posts Slack message with build link
 

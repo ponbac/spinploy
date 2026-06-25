@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,6 +38,56 @@ use tracing_subscriber::EnvFilter;
 mod api;
 
 const PREVIEW_LIMIT: usize = 3;
+const LEGACY_E2E_RUN_NAME: &str = "Run E2E tests";
+const MAIN_E2E_RUN_NAME: &str = "Run main E2E tests";
+const JOURNAL_TEMPLATE_E2E_RUN_NAME: &str = "Run journal template E2E tests";
+const TRACKED_E2E_RUN_NAMES: [&str; 3] = [
+    LEGACY_E2E_RUN_NAME,
+    MAIN_E2E_RUN_NAME,
+    JOURNAL_TEMPLATE_E2E_RUN_NAME,
+];
+
+type TrackedE2eRuns = BTreeSet<&'static str>;
+
+fn tracked_e2e_run_name(name: &str) -> Option<&'static str> {
+    TRACKED_E2E_RUN_NAMES
+        .iter()
+        .copied()
+        .find(|tracked_name| *tracked_name == name)
+}
+
+fn is_failed_result(result: Option<&str>) -> bool {
+    result
+        .map(|value| value.eq_ignore_ascii_case("failed"))
+        .unwrap_or(false)
+}
+
+fn failed_e2e_run_names(timeline: &AzureBuildTimeline) -> TrackedE2eRuns {
+    timeline
+        .records
+        .iter()
+        .filter_map(|record| {
+            tracked_e2e_run_name(&record.name)
+                .filter(|_| is_failed_result(record.result.as_deref()))
+        })
+        .collect()
+}
+
+fn has_tracked_e2e_runs(timeline: &AzureBuildTimeline) -> bool {
+    timeline
+        .records
+        .iter()
+        .any(|record| tracked_e2e_run_name(&record.name).is_some())
+}
+
+fn format_tracked_e2e_runs(runs: &TrackedE2eRuns) -> String {
+    TRACKED_E2E_RUN_NAMES
+        .iter()
+        .copied()
+        .filter(|run_name| runs.contains(run_name))
+        .collect::<Vec<_>>()
+        .join("`, `")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthDecision {
@@ -815,36 +865,18 @@ async fn azure_build_completed_webhook(
             )
         })?;
 
-    let e2e_failed = timeline.records.iter().any(|r| {
-        r.name == "Run E2E tests"
-            && r.result
-                .as_deref()
-                .map(|res| res.eq_ignore_ascii_case("failed"))
-                .unwrap_or(false)
-    });
+    let failed_e2e_runs = failed_e2e_run_names(&timeline);
 
-    if !e2e_failed {
+    if failed_e2e_runs.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
     tracing::info!(
         build_id,
         build_number = build.build_number.as_deref().unwrap_or(""),
-        "E2E stage failed; checking prior builds for regression"
+        failed_e2e_runs = ?failed_e2e_runs,
+        "Tracked E2E runs failed; checking prior builds for regression"
     );
-
-    // Helper closures reused below
-    let e2e_failed_in = |tl: &AzureBuildTimeline| {
-        tl.records.iter().any(|r| {
-            r.name == "Run E2E tests"
-                && r.result
-                    .as_deref()
-                    .map(|res| res.eq_ignore_ascii_case("failed"))
-                    .unwrap_or(false)
-        })
-    };
-    let e2e_stage_present =
-        |tl: &AzureBuildTimeline| tl.records.iter().any(|r| r.name == "Run E2E tests");
 
     // If we cannot check history, proceed to send (per user request).
     if let (Some(definition_id), Some(branch_name)) = (
@@ -869,26 +901,33 @@ async fn azure_build_completed_webhook(
                     }
                     match azure_client.get_build_timeline(b.id).await {
                         Ok(prev_tl) => {
-                            if !e2e_stage_present(&prev_tl) {
+                            if !has_tracked_e2e_runs(&prev_tl) {
                                 tracing::debug!(
                                     build_id,
                                     prev_build_id = b.id,
-                                    "Previous build missing E2E stage; continuing search"
+                                    "Previous build missing tracked E2E runs; continuing search"
                                 );
                                 continue;
                             }
-                            if e2e_failed_in(&prev_tl) {
+
+                            let prev_failed_e2e_runs = failed_e2e_run_names(&prev_tl);
+
+                            if failed_e2e_runs.is_subset(&prev_failed_e2e_runs) {
                                 tracing::info!(
                                     build_id,
                                     prev_build_id = b.id,
-                                    "E2E already failing in previous build; suppressing Slack"
+                                    prev_failed_e2e_runs = ?prev_failed_e2e_runs,
+                                    "Tracked E2E runs already failing in previous build; suppressing Slack"
                                 );
                                 return Ok(StatusCode::NO_CONTENT.into_response());
                             }
+
                             tracing::info!(
                                 build_id,
                                 prev_build_id = b.id,
-                                "Previous build had E2E stage without failure; treating as new regression"
+                                prev_failed_e2e_runs = ?prev_failed_e2e_runs,
+                                current_failed_e2e_runs = ?failed_e2e_runs,
+                                "Previous build did not fail the same tracked E2E runs; treating as new regression"
                             );
                             break;
                         }
@@ -956,8 +995,11 @@ async fn azure_build_completed_webhook(
         .unwrap_or("");
 
     let mut message = format!(
-        "*:warning: Run E2E tests failed*\n\n• 🏗️ Build: *{}* (ID `{}`)\n• 🧪 Stage: `Run E2E tests`\n• 👤 Commit author: *{}*",
-        build_number, build_id, commit.author.name
+        "*:warning: Playwright E2E failed*\n\n• 🏗️ Build: *{}* (ID `{}`)\n• 🧪 Stage: `Playwright E2E Tests`\n• ▶️ Failed runs: `{}`\n• 👤 Commit author: *{}*",
+        build_number,
+        build_id,
+        format_tracked_e2e_runs(&failed_e2e_runs),
+        commit.author.name
     );
 
     if !build_link.is_empty() {
@@ -1137,5 +1179,84 @@ async fn prune_previews_if_over_limit(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeline_record(name: &str, result: Option<&str>) -> AzureTimelineRecord {
+        AzureTimelineRecord {
+            name: name.to_string(),
+            result: result.map(str::to_string),
+            record_type: None,
+            state: None,
+        }
+    }
+
+    fn timeline(records: impl IntoIterator<Item = AzureTimelineRecord>) -> AzureBuildTimeline {
+        AzureBuildTimeline {
+            records: records.into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn collects_failed_legacy_and_split_e2e_runs() {
+        let timeline = timeline([
+            timeline_record("Build release artifacts", Some("failed")),
+            timeline_record(LEGACY_E2E_RUN_NAME, Some("failed")),
+            timeline_record(MAIN_E2E_RUN_NAME, Some("failed")),
+            timeline_record(JOURNAL_TEMPLATE_E2E_RUN_NAME, Some("succeeded")),
+        ]);
+
+        let failed = failed_e2e_run_names(&timeline);
+
+        assert_eq!(
+            failed,
+            BTreeSet::from([LEGACY_E2E_RUN_NAME, MAIN_E2E_RUN_NAME])
+        );
+    }
+
+    #[test]
+    fn formats_failed_runs_in_tracked_order() {
+        let runs = BTreeSet::from([JOURNAL_TEMPLATE_E2E_RUN_NAME, MAIN_E2E_RUN_NAME]);
+
+        assert_eq!(
+            format_tracked_e2e_runs(&runs),
+            "Run main E2E tests`, `Run journal template E2E tests"
+        );
+    }
+
+    #[test]
+    fn ignores_untracked_failures_when_matching_e2e_runs() {
+        let timeline = timeline([
+            timeline_record("Playwright E2E main", Some("failed")),
+            timeline_record("Publish E2E JUnit", Some("failed")),
+            timeline_record("Verify deployed UAT targets", Some("failed")),
+        ]);
+
+        assert!(!has_tracked_e2e_runs(&timeline));
+        assert!(failed_e2e_run_names(&timeline).is_empty());
+    }
+
+    #[test]
+    fn previous_build_must_cover_current_failed_runs_to_suppress_slack() {
+        let current_failed = failed_e2e_run_names(&timeline([
+            timeline_record(MAIN_E2E_RUN_NAME, Some("failed")),
+            timeline_record(JOURNAL_TEMPLATE_E2E_RUN_NAME, Some("failed")),
+        ]));
+        let previous_same = timeline([
+            timeline_record(MAIN_E2E_RUN_NAME, Some("failed")),
+            timeline_record(JOURNAL_TEMPLATE_E2E_RUN_NAME, Some("failed")),
+        ]);
+        let previous_partial = timeline([timeline_record(
+            JOURNAL_TEMPLATE_E2E_RUN_NAME,
+            Some("failed"),
+        )]);
+
+        assert!(has_tracked_e2e_runs(&previous_same));
+        assert!(current_failed.is_subset(&failed_e2e_run_names(&previous_same)));
+        assert!(!current_failed.is_subset(&failed_e2e_run_names(&previous_partial)));
     }
 }
