@@ -38,6 +38,7 @@ use tracing_subscriber::EnvFilter;
 mod api;
 
 const PREVIEW_LIMIT: usize = 3;
+const DELETE_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(250), Duration::from_secs(1)];
 const LEGACY_E2E_RUN_NAME: &str = "Run E2E tests";
 const MAIN_E2E_RUN_NAME: &str = "Run main E2E tests";
 const JOURNAL_TEMPLATE_E2E_RUN_NAME: &str = "Run journal template E2E tests";
@@ -579,27 +580,78 @@ IMAGE_ANALYSIS_API_KEY=${{project.IMAGE_ANALYSIS_API_KEY}}
     }
 }
 
+#[derive(Debug)]
+enum DeletePreviewOutcome {
+    Deleted,
+    AlreadyAbsent,
+}
+
 async fn delete_preview_internal(
     dokploy_client: &DokployClient,
     api_key: &str,
-    pr_id: &Option<String>,
-    git_branch: &str,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let identifier = spinploy::compute_identifier(pr_id, git_branch);
+    identifier: &str,
+) -> anyhow::Result<DeletePreviewOutcome> {
+    let Some(compose) = dokploy_client
+        .find_compose_by_name(api_key, identifier)
+        .await?
+    else {
+        return Ok(DeletePreviewOutcome::AlreadyAbsent);
+    };
 
-    match dokploy_client
-        .find_compose_by_name(&api_key, &identifier)
-        .await
-    {
-        Ok(Some(compose)) => {
-            dokploy_client
-                .delete_compose(api_key, &compose.compose_id, true)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            Ok(StatusCode::NO_CONTENT)
+    dokploy_client
+        .delete_compose(api_key, &compose.compose_id, true)
+        .await?;
+    Ok(DeletePreviewOutcome::Deleted)
+}
+
+async fn delete_preview_with_retry(
+    dokploy_client: &DokployClient,
+    api_key: &str,
+    identifier: &str,
+) -> anyhow::Result<DeletePreviewOutcome> {
+    let max_attempts = DELETE_RETRY_DELAYS.len() + 1;
+
+    for attempt in 1..=max_attempts {
+        match delete_preview_internal(dokploy_client, api_key, identifier).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if attempt == max_attempts => return Err(error),
+            Err(error) => {
+                let delay = DELETE_RETRY_DELAYS[attempt - 1];
+                tracing::warn!(
+                    identifier,
+                    attempt,
+                    max_attempts,
+                    retry_delay_ms = delay.as_millis(),
+                    error = %error,
+                    "Preview deletion attempt failed; retrying"
+                );
+                tokio::time::sleep(delay).await;
+            }
         }
-        Ok(None) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+
+    unreachable!("delete retry loop always returns")
+}
+
+async fn run_preview_deletion(
+    dokploy_client: &DokployClient,
+    api_key: &str,
+    identifier: &str,
+) -> anyhow::Result<DeletePreviewOutcome> {
+    match delete_preview_with_retry(dokploy_client, api_key, identifier).await {
+        Ok(outcome) => {
+            tracing::info!(identifier, ?outcome, "Preview deletion completed");
+            Ok(outcome)
+        }
+        Err(error) => {
+            tracing::error!(
+                identifier,
+                attempts = DELETE_RETRY_DELAYS.len() + 1,
+                error = %error,
+                "Preview deletion ultimately failed"
+            );
+            Err(error)
+        }
     }
 }
 
@@ -660,7 +712,10 @@ async fn delete_preview(
     ApiKey(api_key): ApiKey,
     Json(body): Json<ComposeCreateUpdateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    delete_preview_internal(&dokploy_client, &api_key, &body.pr_id, &body.git_branch).await?;
+    let identifier = spinploy::compute_identifier(&body.pr_id, &body.git_branch);
+    delete_preview_internal(&dokploy_client, &api_key, &identifier)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -748,21 +803,40 @@ async fn azure_pr_comment_webhook(
             Ok(Json(resp).into_response())
         }
         SlashCommand::Delete => {
-            delete_preview_internal(&dokploy_client, &api_key, &pr_id, &branch).await?;
+            let identifier = spinploy::compute_identifier(&pr_id, &branch);
+            let repo_id = repo_id.clone();
+            let pull_request_id = payload.resource.pull_request.pull_request_id;
 
-            if let Err(e) = azure_client
-                .reply_in_thread(
-                    repo_id,
-                    payload.resource.pull_request.pull_request_id,
-                    thread_id,
-                    "🗑️ Preview deleted",
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to post ADO reply for /delete");
-            }
+            tracing::info!(identifier, "Queued preview deletion from Azure PR comment");
+            // Spinploy has no durable work queue. This detaches Dokploy from Azure's request
+            // lifecycle, but a process shutdown can still interrupt the task before it finishes.
+            tokio::spawn(async move {
+                let reply = match run_preview_deletion(&dokploy_client, &api_key, &identifier).await
+                {
+                    Ok(outcome) => match outcome {
+                        DeletePreviewOutcome::Deleted => "🗑️ Preview deleted".to_string(),
+                        DeletePreviewOutcome::AlreadyAbsent => {
+                            "🗑️ Preview was already absent".to_string()
+                        }
+                    },
+                    Err(_) => format!(
+                        "⚠️ Could not delete preview `{identifier}` after retries. Please try `/delete` again."
+                    ),
+                };
 
-            Ok(StatusCode::NO_CONTENT.into_response())
+                if let Err(error) = azure_client
+                    .reply_in_thread(&repo_id, pull_request_id, thread_id, &reply)
+                    .await
+                {
+                    tracing::warn!(
+                        identifier,
+                        error = %error,
+                        "Failed to post ADO reply for /delete"
+                    );
+                }
+            });
+
+            Ok(StatusCode::ACCEPTED.into_response())
         }
     }
 }
@@ -798,7 +872,11 @@ async fn azure_pr_updated_webhook(
         );
 
         if target_branch == "main" {
-            delete_preview_internal(&dokploy_client, &api_key, &pr_id, &branch).await?;
+            let identifier = spinploy::compute_identifier(&pr_id, &branch);
+            tracing::info!(identifier, "Queued preview deletion for completed Azure PR");
+            tokio::spawn(async move {
+                let _ = run_preview_deletion(&dokploy_client, &api_key, &identifier).await;
+            });
         }
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
@@ -1185,6 +1263,201 @@ async fn prune_previews_if_over_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
+    use tower::ServiceExt;
+
+    #[derive(Clone, Copy)]
+    enum DokployDeleteBehavior {
+        Succeeds,
+        Fails,
+        AlreadyAbsent,
+    }
+
+    struct DokployFixture {
+        behavior: DokployDeleteBehavior,
+        project_requests: AtomicUsize,
+        delete_requests: AtomicUsize,
+        deploy_requests: AtomicUsize,
+    }
+
+    async fn spawn_test_server(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test API");
+        });
+        format!("http://{address}")
+    }
+
+    async fn spawn_dokploy_fixture(
+        behavior: DokployDeleteBehavior,
+    ) -> (String, Arc<DokployFixture>) {
+        let fixture = Arc::new(DokployFixture {
+            behavior,
+            project_requests: AtomicUsize::new(0),
+            delete_requests: AtomicUsize::new(0),
+            deploy_requests: AtomicUsize::new(0),
+        });
+        let app = Router::new()
+            .route(
+                "/project.all",
+                get(|State(fixture): State<Arc<DokployFixture>>| async move {
+                    fixture.project_requests.fetch_add(1, Ordering::SeqCst);
+                    let composes = match fixture.behavior {
+                        DokployDeleteBehavior::AlreadyAbsent => vec![],
+                        DokployDeleteBehavior::Succeeds | DokployDeleteBehavior::Fails => {
+                            vec![serde_json::json!({
+                                "composeId": "compose-id",
+                                "name": "pr-42",
+                                "appName": "preview-pr-42",
+                                "environmentId": "environment-id"
+                            })]
+                        }
+                    };
+                    Json(serde_json::json!([{
+                        "projectId": "project-id",
+                        "name": "test-project",
+                        "organizationId": "organization-id",
+                        "environments": [{
+                            "environmentId": "environment-id",
+                            "name": "test",
+                            "projectId": "project-id",
+                            "compose": composes
+                        }]
+                    }]))
+                }),
+            )
+            .route(
+                "/compose.delete",
+                post(|State(fixture): State<Arc<DokployFixture>>| async move {
+                    fixture.delete_requests.fetch_add(1, Ordering::SeqCst);
+                    match fixture.behavior {
+                        DokployDeleteBehavior::Fails => {
+                            (StatusCode::BAD_GATEWAY, "Dokploy unavailable")
+                        }
+                        DokployDeleteBehavior::Succeeds | DokployDeleteBehavior::AlreadyAbsent => {
+                            (StatusCode::OK, "")
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/compose.deploy",
+                post(|State(fixture): State<Arc<DokployFixture>>| async move {
+                    fixture.deploy_requests.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }),
+            )
+            .route(
+                "/domain.byComposeId",
+                get(|| async { Json(serde_json::json!([])) }),
+            )
+            .with_state(Arc::clone(&fixture));
+        (spawn_test_server(app).await, fixture)
+    }
+
+    async fn spawn_azure_reply_recorder() -> (String, mpsc::UnboundedReceiver<String>) {
+        let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/{*path}",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let reply_tx = reply_tx.clone();
+                async move {
+                    let content = body["content"].as_str().unwrap_or_default().to_string();
+                    reply_tx.send(content).expect("record Azure reply");
+                    StatusCode::CREATED
+                }
+            }),
+        );
+        (spawn_test_server(app).await, reply_rx)
+    }
+
+    fn test_config(dokploy_url: String) -> Config {
+        Config {
+            dokploy_url,
+            project_id: "project-id".to_string(),
+            environment_id: "environment-id".to_string(),
+            custom_git_url: "git@example.test:repo.git".to_string(),
+            custom_git_ssh_key_id: "ssh-key-id".to_string(),
+            compose_path: "compose.yml".to_string(),
+            base_domain: "example.test".to_string(),
+            frontend_service_name: "frontend".to_string(),
+            frontend_port: 3000,
+            backend_service_name: "backend".to_string(),
+            backend_port: 8080,
+            azdo_org: "organization".to_string(),
+            azdo_project: "project".to_string(),
+            azdo_repository_id: "repository-id".to_string(),
+            azdo_pat: "azure-secret".to_string(),
+            slack_webhook_url: "https://example.test/slack".to_string(),
+            auth_cache_ttl_secs: 60,
+            auth_cache_negative_ttl_secs: 10,
+            storage: None,
+            deployed_preview_api_path: "https://example.test/previews".to_string(),
+        }
+    }
+
+    fn test_state(config: Config, azure_base_url: &str) -> AppState {
+        AppState {
+            dokploy_client: Arc::new(DokployClient::new(&config.dokploy_url)),
+            azure_client: Arc::new(AzureDevOpsClient::with_base_url(
+                azure_base_url,
+                &config.azdo_org,
+                &config.azdo_project,
+                &config.azdo_pat,
+            )),
+            docker_client: None,
+            slack_client: Arc::new(
+                SlackWebhookClient::new(&config.slack_webhook_url).expect("Slack test client"),
+            ),
+            auth_cache: Arc::new(AuthCache::new(60, 10, 16)),
+            pr_title_cache: Arc::new(PrTitleCache::new(60, 16)),
+            config,
+        }
+    }
+
+    fn pr_comment_body(content: &str) -> serde_json::Value {
+        serde_json::json!({
+            "eventType": "ms.vss-code.git-pullrequest-comment-event",
+            "resource": {
+                "comment": {
+                    "content": content,
+                    "isDeleted": false,
+                    "_links": {
+                        "threads": { "href": "https://example.test/threads/7" }
+                    }
+                },
+                "pullRequest": {
+                    "pullRequestId": 42,
+                    "sourceRefName": "refs/heads/fix/delete"
+                }
+            }
+        })
+    }
+
+    async fn send_pr_comment_webhook(state: AppState, content: &str) -> axum::response::Response {
+        state
+            .auth_cache
+            .insert("dokploy-secret".to_string(), AuthDecision::Valid)
+            .await;
+        let app = Router::new()
+            .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
+            .with_state(state);
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhooks/azure/pr-comment")
+                .header("content-type", "application/json")
+                .header("x-api-key", "dokploy-secret")
+                .body(Body::from(pr_comment_body(content).to_string()))
+                .expect("PR comment webhook request"),
+        )
+        .await
+        .expect("PR comment webhook response")
+    }
 
     fn timeline_record(name: &str, result: Option<&str>) -> AzureTimelineRecord {
         AzureTimelineRecord {
@@ -1258,5 +1531,84 @@ mod tests {
         assert!(has_tracked_e2e_runs(&previous_same));
         assert!(current_failed.is_subset(&failed_e2e_run_names(&previous_same)));
         assert!(!current_failed.is_subset(&failed_e2e_run_names(&previous_partial)));
+    }
+
+    #[tokio::test]
+    async fn delete_comment_acknowledges_dokploy_failure() {
+        let (dokploy_url, fixture) = spawn_dokploy_fixture(DokployDeleteBehavior::Fails).await;
+        let (azure_base_url, mut replies) = spawn_azure_reply_recorder().await;
+        let state = test_state(test_config(dokploy_url), &azure_base_url);
+
+        let response = send_pr_comment_webhook(state, "/delete").await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let reply = tokio::time::timeout(Duration::from_secs(3), replies.recv())
+            .await
+            .expect("background deletion should finish")
+            .expect("Azure reply should be recorded");
+        assert!(reply.contains("Could not delete preview"));
+        assert!(!reply.contains("Dokploy unavailable"));
+        assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(fixture.delete_requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn delete_comment_deletes_preview_and_replies_after_success() {
+        let (dokploy_url, fixture) = spawn_dokploy_fixture(DokployDeleteBehavior::Succeeds).await;
+        let (azure_base_url, mut replies) = spawn_azure_reply_recorder().await;
+        let state = test_state(test_config(dokploy_url), &azure_base_url);
+
+        let response = send_pr_comment_webhook(state, "/delete").await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let reply = tokio::time::timeout(Duration::from_secs(1), replies.recv())
+            .await
+            .expect("background deletion should finish")
+            .expect("Azure reply should be recorded");
+        assert_eq!(reply, "🗑️ Preview deleted");
+        assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.delete_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_delete_comments_succeed_when_preview_is_already_absent() {
+        let (dokploy_url, fixture) =
+            spawn_dokploy_fixture(DokployDeleteBehavior::AlreadyAbsent).await;
+        let (azure_base_url, mut replies) = spawn_azure_reply_recorder().await;
+        let state = test_state(test_config(dokploy_url), &azure_base_url);
+
+        for _ in 0..2 {
+            let response = send_pr_comment_webhook(state.clone(), "/delete").await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+
+        for _ in 0..2 {
+            let reply = tokio::time::timeout(Duration::from_secs(1), replies.recv())
+                .await
+                .expect("background deletion should finish")
+                .expect("Azure reply should be recorded");
+            assert_eq!(reply, "🗑️ Preview was already absent");
+        }
+        assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.delete_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn preview_comment_behavior_is_unchanged() {
+        let (dokploy_url, fixture) = spawn_dokploy_fixture(DokployDeleteBehavior::Succeeds).await;
+        let (azure_base_url, mut replies) = spawn_azure_reply_recorder().await;
+        let state = test_state(test_config(dokploy_url), &azure_base_url);
+
+        let response = send_pr_comment_webhook(state, "/preview").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let reply = tokio::time::timeout(Duration::from_secs(1), replies.recv())
+            .await
+            .expect("preview reply should finish")
+            .expect("Azure reply should be recorded");
+        assert!(reply.contains("Preview building"));
+        assert_eq!(fixture.deploy_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.delete_requests.load(Ordering::SeqCst), 0);
     }
 }
