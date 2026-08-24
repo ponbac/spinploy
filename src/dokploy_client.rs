@@ -6,14 +6,113 @@ use crate::models::dokploy::{
 };
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
+use regress::Regex;
+use reqwest::Response;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{http::Request as WsRequest, Message},
+    tungstenite::{Message, http::Request as WsRequest},
 };
 // keep client lean; avoid verbose tracing here
+
+const ERROR_RESPONSE_BODY_LIMIT: usize = 2 * 1024;
+
+async fn read_error_body(response: Response, api_key: &str) -> String {
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::with_capacity(ERROR_RESPONSE_BODY_LIMIT);
+    let mut truncated = false;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return format!("<failed to read response body: {error}>"),
+        };
+        let remaining = ERROR_RESPONSE_BODY_LIMIT.saturating_sub(bytes.len());
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    let mut body = sanitize_error_body(&bytes, api_key);
+    if body.is_empty() {
+        body.push_str("<empty>");
+    }
+    if truncated {
+        body.push_str("… <truncated>");
+    }
+    body
+}
+
+fn sanitize_error_body(bytes: &[u8], api_key: &str) -> String {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if !api_key.is_empty() {
+        text = text.replace(api_key, "[REDACTED]");
+    }
+    text = redact_sensitive_assignments(&text);
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(mut value) => {
+            redact_sensitive_json(&mut value);
+            value.to_string()
+        }
+        Err(_) => text.split_whitespace().collect::<Vec<_>>().join(" "),
+    }
+}
+
+fn redact_sensitive_assignments(text: &str) -> String {
+    let Ok(pattern) = Regex::with_flags(
+        r#"((?:"|')?\b(?:api[_ -]?key|authorization|credentials?|password|passwd|pat|refresh[_ -]?token|secret|token)\b(?:"|')?\s*[:=]\s*)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^,\s&}]*)"#,
+        "i",
+    ) else {
+        return text.to_string();
+    };
+
+    pattern.replace_all(text, r#"$1"[REDACTED]""#)
+}
+
+fn redact_sensitive_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if is_sensitive_field(key) {
+                    *value = serde_json::Value::String("[REDACTED]".to_string());
+                } else {
+                    redact_sensitive_json(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_sensitive_json(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_field(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace(['-', ' '], "_");
+    matches!(
+        normalized.as_str(),
+        "api_key"
+            | "apikey"
+            | "authorization"
+            | "credential"
+            | "credentials"
+            | "password"
+            | "passwd"
+            | "pat"
+            | "refresh_token"
+            | "secret"
+            | "token"
+    ) || normalized.ends_with("_secret")
+        || normalized.ends_with("_token")
+}
 
 /// Lightweight wrapper around the Dokploy API using manual reqwest calls.
 #[derive(Clone, Debug)]
@@ -48,14 +147,28 @@ impl DokployClient {
         format!("{}/{}", self.base_url, url.trim_start_matches('/'))
     }
 
+    async fn require_success(
+        response: Response,
+        endpoint: &str,
+        api_key: &str,
+    ) -> Result<Response> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+
+        let body = read_error_body(response, api_key).await;
+        bail!("Dokploy API {endpoint} failed with HTTP status {status}; response body: {body}")
+    }
+
     async fn get<T: DeserializeOwned>(&self, api_key: &str, url: &str) -> Result<T> {
         let resp = self
             .http
             .get(self.join_url(url))
             .headers(Self::auth_headers(api_key)?)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let resp = Self::require_success(resp, url, api_key).await?;
 
         resp.json::<T>()
             .await
@@ -68,14 +181,8 @@ impl DokployClient {
         url: &str,
         body: impl Serialize,
     ) -> Result<T> {
-        let resp = self
-            .http
-            .post(self.join_url(url))
-            .headers(Self::auth_headers(api_key)?)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = self.post_response(api_key, url, body).await?;
+        let resp = Self::require_success(resp, url, api_key).await?;
 
         resp.json::<T>()
             .await
@@ -84,14 +191,24 @@ impl DokployClient {
 
     /// POST helper for endpoints where the response body is irrelevant.
     async fn post_unit(&self, api_key: &str, url: &str, body: impl Serialize) -> Result<()> {
-        self.http
+        let resp = self.post_response(api_key, url, body).await?;
+        Self::require_success(resp, url, api_key).await?;
+        Ok(())
+    }
+
+    async fn post_response(
+        &self,
+        api_key: &str,
+        url: &str,
+        body: impl Serialize,
+    ) -> Result<Response> {
+        Ok(self
+            .http
             .post(self.join_url(url))
             .headers(Self::auth_headers(api_key)?)
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
+            .await?)
     }
 
     /// Retrieve all projects with nested environments and compose definitions.
@@ -140,15 +257,21 @@ impl DokployClient {
         compose_id: impl AsRef<str> + std::fmt::Debug,
         delete_volumes: bool,
     ) -> Result<()> {
-        self.post_unit(
-            api_key,
-            "compose.delete",
-            DeleteComposeRequest {
-                compose_id: compose_id.as_ref().to_string(),
-                delete_volumes,
-            },
-        )
-        .await
+        let response = self
+            .post_response(
+                api_key,
+                "compose.delete",
+                DeleteComposeRequest {
+                    compose_id: compose_id.as_ref().to_string(),
+                    delete_volumes,
+                },
+            )
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Self::require_success(response, "compose.delete", api_key).await?;
+        Ok(())
     }
 
     pub async fn create_compose(
@@ -196,8 +319,8 @@ impl DokployClient {
             .get(self.join_url(&url))
             .headers(Self::auth_headers(api_key)?)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let resp = Self::require_success(resp, &url, api_key).await?;
 
         let body = resp.text().await?;
         if body.trim().is_empty() {
@@ -259,10 +382,7 @@ impl DokployClient {
             .replace("http://", "ws://");
 
         let encoded_log_path = urlencoding::encode(log_path);
-        let full_url = format!(
-            "{}/listen-deployment?logPath={}",
-            ws_url, encoded_log_path
-        );
+        let full_url = format!("{}/listen-deployment?logPath={}", ws_url, encoded_log_path);
 
         tracing::debug!(url = %full_url, "Connecting to Dokploy WebSocket");
 
@@ -278,7 +398,10 @@ impl DokployClient {
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
             .body(())
             .context("Failed to build WebSocket request")?;
 
@@ -293,11 +416,10 @@ impl DokployClient {
         tokio::spawn(async move {
             while let Some(msg_result) = read.next().await {
                 match msg_result {
-                    Ok(Message::Text(text)) => {
-                        if tx.send(Ok(text.to_string())).await.is_err() {
-                            break;
-                        }
+                    Ok(Message::Text(text)) if tx.send(Ok(text.to_string())).await.is_err() => {
+                        break;
                     }
+                    Ok(Message::Text(_)) => {}
                     Ok(Message::Close(_)) => {
                         break;
                     }
@@ -317,12 +439,24 @@ impl DokployClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, http::StatusCode, routing::post};
 
     fn client_with_api_key() -> (DokployClient, String) {
         crate::test_init_env();
         let client = DokployClient::new(std::env::var("DOKPLOY_URL").unwrap());
         let api_key = std::env::var("DOKPLOY_API_KEY").unwrap();
         (client, api_key)
+    }
+
+    async fn spawn_test_server(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test API");
+        });
+        format!("http://{address}")
     }
 
     #[tokio::test]
@@ -332,5 +466,78 @@ mod tests {
 
         let res = dbg!(client.find_compose_by_name(&api_key, "pr-1774").await);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn sanitizes_sensitive_json_fields_and_known_credentials() {
+        let body = br#"{
+            "message": "request failed for known-api-key",
+            "password": "do-not-log",
+            "nested": { "access_token": "also-do-not-log" }
+        }"#;
+
+        let sanitized = sanitize_error_body(body, "known-api-key");
+
+        assert!(sanitized.contains("request failed for [REDACTED]"));
+        assert!(!sanitized.contains("known-api-key"));
+        assert!(!sanitized.contains("do-not-log"));
+        assert!(!sanitized.contains("also-do-not-log"));
+    }
+
+    #[test]
+    fn sanitizes_sensitive_fields_in_truncated_responses() {
+        let body = format!(
+            r#"{{"password":"do-not-log","message":"{}""#,
+            "x".repeat(ERROR_RESPONSE_BODY_LIMIT)
+        );
+
+        let sanitized = sanitize_error_body(
+            &body.as_bytes()[..ERROR_RESPONSE_BODY_LIMIT],
+            "known-api-key",
+        );
+
+        assert!(sanitized.contains(r#""password":"[REDACTED]""#));
+        assert!(!sanitized.contains("do-not-log"));
+    }
+
+    #[tokio::test]
+    async fn failed_request_reports_status_and_bounded_sanitized_body() {
+        let api_key = "known-api-key";
+        let response_body = format!("upstream echoed {api_key}\n{}", "x".repeat(4096));
+        let app = Router::new().route(
+            "/compose.delete",
+            post(move || {
+                let response_body = response_body.clone();
+                async move { (StatusCode::BAD_GATEWAY, response_body) }
+            }),
+        );
+        let client = DokployClient::new(spawn_test_server(app).await);
+
+        let error = client
+            .delete_compose(api_key, "compose-id", true)
+            .await
+            .expect_err("delete should fail")
+            .to_string();
+
+        assert!(error.contains("compose.delete"));
+        assert!(error.contains("502 Bad Gateway"));
+        assert!(error.contains("upstream echoed [REDACTED]"));
+        assert!(error.contains("<truncated>"));
+        assert!(!error.contains(api_key));
+        assert!(error.len() < ERROR_RESPONSE_BODY_LIMIT + 256);
+    }
+
+    #[tokio::test]
+    async fn delete_is_idempotent_when_compose_is_already_absent() {
+        let app = Router::new().route(
+            "/compose.delete",
+            post(|| async { (StatusCode::NOT_FOUND, "compose not found") }),
+        );
+        let client = DokployClient::new(spawn_test_server(app).await);
+
+        client
+            .delete_compose("known-api-key", "already-deleted", true)
+            .await
+            .expect("404 delete should be idempotent success");
     }
 }
