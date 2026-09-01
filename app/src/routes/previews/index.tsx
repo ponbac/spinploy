@@ -166,7 +166,9 @@ function PreviewsPage() {
 										{/* Right Column - URLs & Containers */}
 										<div className="space-y-4">
 											{/* URLs */}
-											{(preview.frontendUrl || preview.backendUrl) && (
+											{(preview.frontendUrl ||
+												preview.backendUrl ||
+												preview.dashboardUrl) && (
 												<div className="bg-gray-900 border border-gray-800 p-4">
 													<div className="text-xs text-gray-500 uppercase tracking-wider font-mono mb-3">
 														Endpoints
@@ -192,6 +194,17 @@ function PreviewsPage() {
 																onClick={(e) => e.stopPropagation()}
 															>
 																→ {preview.backendUrl}
+															</a>
+														)}
+														{preview.dashboardUrl && (
+															<a
+																href={preview.dashboardUrl}
+																target="_blank"
+																rel="noopener noreferrer"
+																className="block text-sm font-mono text-violet-400 hover:text-violet-300 break-all"
+																onClick={(e) => e.stopPropagation()}
+															>
+																→ Aspire: {preview.dashboardUrl}
 															</a>
 														)}
 													</div>

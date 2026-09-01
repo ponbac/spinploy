@@ -44,6 +44,8 @@ pub struct AzureHref {
 pub struct AzurePullRequest {
     pub pull_request_id: u64,
     pub source_ref_name: String,
+    #[serde(default)]
+    pub target_ref_name: Option<String>,
 }
 
 // Azure DevOps git.pullrequest.updated (PushNotification filtered) minimal payload
@@ -169,4 +171,29 @@ pub struct AzureBuildListItem {
 #[derive(Debug, Deserialize)]
 pub struct AzurePullRequestDetail {
     pub title: String,
+    #[serde(rename = "sourceRefName")]
+    pub source_ref_name: String,
+    #[serde(rename = "targetRefName")]
+    pub target_ref_name: String,
+    #[serde(rename = "lastMergeSourceCommit")]
+    pub last_merge_source_commit: AzureGitVersion,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureGitVersion {
+    pub commit_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureGitRefList {
+    #[serde(default)]
+    pub value: Vec<AzureGitRef>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureGitRef {
+    pub name: String,
+    pub object_id: String,
 }

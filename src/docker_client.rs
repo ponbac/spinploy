@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use bollard::container::{ListContainersOptions, LogsOptions};
 use bollard::Docker;
+use bollard::container::{ListContainersOptions, LogsOptions};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
@@ -100,6 +100,11 @@ impl DockerClient {
         Ok(containers
             .into_iter()
             .map(|c| ContainerInfo {
+                compose_service: c
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get("com.docker.compose.service"))
+                    .cloned(),
                 id: c.id.unwrap_or_default(),
                 names: c.names.unwrap_or_default(),
                 image: c.image.unwrap_or_default(),
@@ -112,6 +117,7 @@ impl DockerClient {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ContainerInfo {
+    pub compose_service: Option<String>,
     pub id: String,
     pub names: Vec<String>,
     pub image: String,

@@ -19,6 +19,7 @@ pub struct PreviewSummary {
     pub last_deployed_at: Option<String>,
     pub frontend_url: Option<String>,
     pub backend_url: Option<String>,
+    pub dashboard_url: Option<String>,
     pub pr_url: Option<String>,
     pub containers: Vec<ContainerSummary>,
 }

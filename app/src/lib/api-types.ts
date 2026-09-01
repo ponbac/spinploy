@@ -19,6 +19,7 @@ export interface PreviewSummary {
 	lastDeployedAt: string | null;
 	frontendUrl: string | null;
 	backendUrl: string | null;
+	dashboardUrl: string | null;
 	prUrl: string | null;
 	containers: ContainerSummary[];
 }

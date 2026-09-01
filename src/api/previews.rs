@@ -88,17 +88,23 @@ async fn determine_preview_status(
     state: &AppState,
     compose_detail: &spinploy::models::dokploy::ComposeDetail,
     app_name: &str,
+    identifier: &str,
 ) -> PreviewStatus {
+    if let Some(status) = state.preview_deployer.status(identifier).await {
+        return match status {
+            spinploy::PreviewReconcileStatus::Building => PreviewStatus::Building,
+            spinploy::PreviewReconcileStatus::Running => PreviewStatus::Running,
+            spinploy::PreviewReconcileStatus::Failed => PreviewStatus::Failed,
+        };
+    }
+
     // Find the latest deployment by timestamp (Dokploy doesn't guarantee order)
-    let latest_deployment = compose_detail
-        .deployments
-        .iter()
-        .max_by_key(|d| {
-            d.finished_at
-                .as_ref()
-                .or(d.started_at.as_ref())
-                .or(d.created_at.as_ref())
-        });
+    let latest_deployment = compose_detail.deployments.iter().max_by_key(|d| {
+        d.finished_at
+            .as_ref()
+            .or(d.started_at.as_ref())
+            .or(d.created_at.as_ref())
+    });
 
     if let Some(latest_deployment) = latest_deployment {
         // Check deployment status from Dokploy (case-insensitive)
@@ -106,7 +112,13 @@ async fn determine_preview_status(
             match status.to_lowercase().as_str() {
                 "error" => return PreviewStatus::Failed,
                 "running" => return PreviewStatus::Building,
-                "done" => return PreviewStatus::Running,
+                "done" => {
+                    return if state.preview_deployer.is_ready(identifier).await {
+                        PreviewStatus::Running
+                    } else {
+                        PreviewStatus::Building
+                    };
+                }
                 _ => {} // Unknown status, fall through to container check
             }
         }
@@ -195,7 +207,7 @@ pub async fn list_previews(
             .ok();
 
         let status = if let Some(ref detail) = compose_detail {
-            determine_preview_status(&state, detail, &compose.app_name).await
+            determine_preview_status(&state, detail, &compose.app_name, &identifier).await
         } else {
             PreviewStatus::Unknown
         };
@@ -222,9 +234,11 @@ pub async fn list_previews(
             .find(|d| d.service_name == state.config.frontend_service_name)
             .map(|d| format!("https://{}", d.host));
 
-        let backend_url = domains
+        let backend_url = None;
+
+        let dashboard_url = domains
             .iter()
-            .find(|d| d.service_name == state.config.backend_service_name)
+            .find(|d| d.service_name == "preview-dashboard")
             .map(|d| format!("https://{}", d.host));
 
         let pr_url = pr_id.as_ref().map(|id| build_pr_url(&state, id));
@@ -239,18 +253,8 @@ pub async fn list_previews(
                 .into_iter()
                 .map(|c| {
                     let service = c
-                        .names
-                        .first()
-                        .and_then(|name| {
-                            // Extract service name from container name pattern: preview-{id}-{service}-1
-                            let parts: Vec<&str> =
-                                name.trim_start_matches('/').split('-').collect();
-                            if parts.len() >= 4 {
-                                Some(parts[parts.len() - 2].to_string())
-                            } else {
-                                None
-                            }
-                        })
+                        .compose_service
+                        .clone()
                         .unwrap_or_else(|| "unknown".to_string());
 
                     ContainerSummary {
@@ -283,6 +287,7 @@ pub async fn list_previews(
             last_deployed_at,
             frontend_url,
             backend_url,
+            dashboard_url,
             pr_url,
             containers,
         });
@@ -337,7 +342,8 @@ pub async fn get_preview_detail(
             )
         })?;
 
-    let status = determine_preview_status(&state, &compose_detail, &compose.app_name).await;
+    let status =
+        determine_preview_status(&state, &compose_detail, &compose.app_name, &identifier).await;
 
     let last_deployed_at = compose_detail.deployments.last().and_then(|dep| {
         dep.finished_at
@@ -358,9 +364,11 @@ pub async fn get_preview_detail(
         .find(|d| d.service_name == state.config.frontend_service_name)
         .map(|d| format!("https://{}", d.host));
 
-    let backend_url = domains
+    let backend_url = None;
+
+    let dashboard_url = domains
         .iter()
-        .find(|d| d.service_name == state.config.backend_service_name)
+        .find(|d| d.service_name == "preview-dashboard")
         .map(|d| format!("https://{}", d.host));
 
     let pr_url = pr_id.as_ref().map(|id| build_pr_url(&state, id));
@@ -375,16 +383,8 @@ pub async fn get_preview_detail(
             .into_iter()
             .map(|c| {
                 let service = c
-                    .names
-                    .first()
-                    .and_then(|name| {
-                        let parts: Vec<&str> = name.trim_start_matches('/').split('-').collect();
-                        if parts.len() >= 4 {
-                            Some(parts[parts.len() - 2].to_string())
-                        } else {
-                            None
-                        }
-                    })
+                    .compose_service
+                    .clone()
                     .unwrap_or_else(|| "unknown".to_string());
 
                 ContainerSummary {
@@ -432,6 +432,7 @@ pub async fn get_preview_detail(
         last_deployed_at,
         frontend_url,
         backend_url,
+        dashboard_url,
         pr_url,
         containers,
     };

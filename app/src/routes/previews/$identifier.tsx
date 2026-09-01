@@ -197,7 +197,7 @@ function PreviewDetailPage() {
 						</div>
 
 						{/* URLs Panel */}
-						{data.frontendUrl || data.backendUrl ? (
+						{data.frontendUrl || data.backendUrl || data.dashboardUrl ? (
 							<div className="bg-gray-950 border-2 border-gray-800">
 								<div className="bg-gray-900 border-b-2 border-gray-800 p-4">
 									<h2 className="font-mono text-lg font-bold text-gray-300 uppercase tracking-wider">
@@ -234,6 +234,16 @@ function PreviewDetailPage() {
 												→ {data.backendUrl}
 											</a>
 										</div>
+									) : null}
+									{data.dashboardUrl ? (
+										<a
+											href={data.dashboardUrl}
+											target="_blank"
+											rel="noopener noreferrer"
+											className="block text-sm font-mono text-violet-400 hover:text-violet-300 break-all"
+										>
+											→ Aspire: {data.dashboardUrl}
+										</a>
 									) : null}
 								</div>
 							</div>

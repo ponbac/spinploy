@@ -79,6 +79,21 @@ pub struct UpdateComposeRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateRawComposeRequest {
+    pub compose_id: String,
+    pub name: String,
+    pub app_name: String,
+    pub env: String,
+    pub source_type: String,
+    pub compose_type: String,
+    pub compose_file: String,
+    pub environment_id: String,
+    pub auto_deploy: bool,
+    pub isolated_deployment: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DomainCreateRequest {
     pub host: String,
     pub path: String,
