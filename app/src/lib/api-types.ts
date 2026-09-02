@@ -10,7 +10,7 @@ export interface ContainerSummary {
 
 export interface PreviewSummary {
 	identifier: string;
-	composeId: string;
+	composeId: string | null;
 	prId: string | null;
 	prTitle: string | null;
 	branch: string;

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -56,6 +58,41 @@ fn build_pr_url(state: &AppState, pr_id: &str) -> String {
         "https://dev.azure.com/{}/{}/_git/{}/pullrequest/{}",
         state.config.azdo_org, state.config.azdo_project, state.config.azdo_repository_id, pr_id
     )
+}
+
+fn reconcile_status(status: spinploy::PreviewReconcileStatus) -> PreviewStatus {
+    match status {
+        spinploy::PreviewReconcileStatus::Building => PreviewStatus::Building,
+        spinploy::PreviewReconcileStatus::Running => PreviewStatus::Running,
+        spinploy::PreviewReconcileStatus::Failed => PreviewStatus::Failed,
+    }
+}
+
+async fn status_only_summary(
+    state: &AppState,
+    snapshot: spinploy::PreviewReconcileSnapshot,
+) -> PreviewSummary {
+    let pr_url = snapshot
+        .pr_id
+        .as_ref()
+        .map(|pr_id| build_pr_url(state, pr_id));
+    let pr_title = fetch_pr_title(state, &snapshot.pr_id).await;
+
+    PreviewSummary {
+        identifier: snapshot.identifier,
+        compose_id: None,
+        pr_id: snapshot.pr_id,
+        pr_title,
+        branch: snapshot.git_branch,
+        status: reconcile_status(snapshot.status),
+        created_at: Some(snapshot.requested_at),
+        last_deployed_at: None,
+        frontend_url: None,
+        backend_url: None,
+        dashboard_url: None,
+        pr_url,
+        containers: Vec::new(),
+    }
 }
 
 async fn resolve_dashboard_login_url(
@@ -144,11 +181,7 @@ async fn determine_preview_status(
     identifier: &str,
 ) -> PreviewStatus {
     if let Some(status) = state.preview_deployer.status(identifier).await {
-        return match status {
-            spinploy::PreviewReconcileStatus::Building => PreviewStatus::Building,
-            spinploy::PreviewReconcileStatus::Running => PreviewStatus::Running,
-            spinploy::PreviewReconcileStatus::Failed => PreviewStatus::Failed,
-        };
+        return reconcile_status(status);
     }
 
     // Find the latest deployment by timestamp (Dokploy doesn't guarantee order)
@@ -238,6 +271,10 @@ pub async fn list_previews(
             )
         })?;
 
+    let compose_identifiers = composes
+        .iter()
+        .map(|compose| compose.name.clone())
+        .collect::<HashSet<_>>();
     let mut previews = Vec::new();
 
     for compose in composes {
@@ -334,7 +371,7 @@ pub async fn list_previews(
 
         previews.push(PreviewSummary {
             identifier,
-            compose_id: compose.compose_id,
+            compose_id: Some(compose.compose_id),
             pr_id,
             pr_title,
             branch,
@@ -347,6 +384,12 @@ pub async fn list_previews(
             pr_url,
             containers,
         });
+    }
+
+    for snapshot in state.preview_deployer.snapshots().await {
+        if !compose_identifiers.contains(&snapshot.identifier) {
+            previews.push(status_only_summary(&state, snapshot).await);
+        }
     }
 
     // Sort by most recent deployment (newest first)
@@ -378,13 +421,29 @@ pub async fn get_preview_detail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to find preview".to_string(),
             )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("Preview '{}' not found", identifier),
-            )
         })?;
+
+    let Some(compose) = compose else {
+        let snapshot = state
+            .preview_deployer
+            .snapshot(&identifier)
+            .await
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("Preview '{}' not found", identifier),
+                )
+            })?;
+        let summary = status_only_summary(&state, snapshot).await;
+
+        return Ok((
+            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+            Json(PreviewDetailResponse {
+                summary,
+                deployments: Vec::new(),
+            }),
+        ));
+    };
 
     let (pr_id, _) = parse_preview_identifier(&identifier);
 
@@ -484,7 +543,7 @@ pub async fn get_preview_detail(
 
     let summary = PreviewSummary {
         identifier,
-        compose_id: compose.compose_id,
+        compose_id: Some(compose.compose_id),
         pr_id,
         pr_title,
         branch,

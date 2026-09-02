@@ -52,7 +52,7 @@ function PreviewsPage() {
 							PREVIEW.DEPLOYMENTS
 						</h1>
 						<div className="text-gray-500 font-mono text-sm">
-							[ {previews.length} ACTIVE ]
+							[ {previews.length} PREVIEWS ]
 						</div>
 					</div>
 					<div className="mt-4 h-1 w-32 bg-emerald-500" />

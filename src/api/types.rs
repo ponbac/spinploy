@@ -10,7 +10,7 @@ pub struct PreviewListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSummary {
     pub identifier: String,
-    pub compose_id: String,
+    pub compose_id: Option<String>,
     pub pr_id: Option<String>,
     pub pr_title: Option<String>,
     pub branch: String,
