@@ -620,6 +620,11 @@ aspire do prepare-preview \
             )
             .await
             .context("failed to create Dokploy compose")?;
+        let compose_file = add_traefik_network_labels_for_dokploy(
+            &compose_file,
+            &compose.app_name,
+            &[&self.config.frontend_service_name, "preview-dashboard"],
+        )?;
 
         self.dokploy_client
             .update_raw_compose(
@@ -1228,6 +1233,40 @@ fn compose_label_list(labels: &Mapping) -> Result<Vec<Value>> {
         .collect()
 }
 
+fn add_traefik_network_labels_for_dokploy(
+    compose: &str,
+    network: &str,
+    service_names: &[&str],
+) -> Result<String> {
+    ensure!(!network.is_empty(), "Dokploy app network must not be empty");
+    let mut document: Value =
+        serde_yaml::from_str(compose).context("generated Compose file is invalid YAML")?;
+    let services = document
+        .get_mut("services")
+        .and_then(Value::as_mapping_mut)
+        .context("generated Compose file has no services mapping")?;
+
+    for service_name in service_names {
+        let service = services
+            .get_mut(*service_name)
+            .and_then(Value::as_mapping_mut)
+            .with_context(|| format!("generated Compose file has no {service_name} service"))?;
+        let labels = service
+            .entry(Value::String("labels".to_string()))
+            .or_insert_with(|| Value::Sequence(Vec::new()))
+            .as_sequence_mut()
+            .with_context(|| format!("Compose labels for {service_name} must use list syntax"))?;
+        labels.retain(|label| {
+            label
+                .as_str()
+                .is_none_or(|label| !label.starts_with("traefik.docker.network="))
+        });
+        labels.push(Value::String(format!("traefik.docker.network={network}")));
+    }
+
+    serde_yaml::to_string(&document).context("failed to serialise generated Compose file")
+}
+
 fn extract_zip_archive(archive_bytes: &[u8], destination: &Path) -> Result<()> {
     let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
         .context("Azure repository response is not a valid zip archive")?;
@@ -1354,5 +1393,48 @@ services:
             document["services"]["frontend"]["labels"],
             Value::Sequence(vec![Value::String("spinploy.managed=true".to_string())])
         );
+    }
+
+    #[test]
+    fn selects_the_reachable_dokploy_network_for_public_services() {
+        let compose = r#"
+services:
+  frontend:
+    networks:
+      - aspire
+      - dokploy
+    labels:
+      spinploy.managed: "true"
+  preview-dashboard:
+    networks:
+      - aspire
+      - dokploy
+    labels:
+      spinploy.managed: "true"
+  sql:
+    networks:
+      - aspire
+"#;
+        let normalized = normalize_compose_labels_for_dokploy(compose).unwrap();
+
+        let routed = add_traefik_network_labels_for_dokploy(
+            &normalized,
+            "preview-pr-42-abc123",
+            &["frontend", "preview-dashboard"],
+        )
+        .unwrap();
+
+        let document: Value = serde_yaml::from_str(&routed).unwrap();
+        for service in ["frontend", "preview-dashboard"] {
+            assert!(
+                document["services"][service]["labels"]
+                    .as_sequence()
+                    .unwrap()
+                    .contains(&Value::String(
+                        "traefik.docker.network=preview-pr-42-abc123".to_string()
+                    ))
+            );
+        }
+        assert!(document["services"]["sql"].get("labels").is_none());
     }
 }
