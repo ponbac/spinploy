@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use crate::models::azure::{
     AzureBuildDetail, AzureBuildListItem, AzureBuildListResponse, AzureBuildTimeline, AzureCommit,
-    AzurePullRequestDetail,
+    AzureGitRefList, AzurePullRequestDetail,
 };
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
 /// Minimal Azure DevOps REST client for posting PR thread comments
 #[derive(Clone, Debug)]
@@ -185,5 +185,76 @@ impl AzureDevOpsClient {
             .await?;
 
         Ok(resp)
+    }
+
+    /// Resolve a branch name to the exact commit that should be built.
+    pub async fn get_branch_head(&self, repo_id: &str, branch_name: &str) -> Result<String> {
+        let branch_name = branch_name.trim_start_matches("refs/heads/");
+        let url = format!(
+            "{}/{}/{}/_apis/git/repositories/{}/refs",
+            self.base_url, self.org, self.project, repo_id
+        );
+
+        let refs = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .query(&[
+                ("filter", format!("heads/{branch_name}")),
+                ("api-version", "7.1".to_string()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AzureGitRefList>()
+            .await?;
+
+        let expected_name = format!("refs/heads/{branch_name}");
+        let matching = refs
+            .value
+            .into_iter()
+            .filter(|git_ref| git_ref.name == expected_name)
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [git_ref] => Ok(git_ref.object_id.clone()),
+            [] => bail!("Azure branch {expected_name} was not found"),
+            _ => bail!("Azure returned multiple refs for branch {expected_name}"),
+        }
+    }
+
+    /// Download a repository snapshot for an exact commit as a zip archive.
+    pub async fn download_repository_archive(
+        &self,
+        repo_id: &str,
+        commit_sha: &str,
+    ) -> Result<Vec<u8>> {
+        let url = format!(
+            "{}/{}/{}/_apis/git/repositories/{}/items",
+            self.base_url, self.org, self.project, repo_id
+        );
+
+        let response = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .query(&[
+                ("scopePath", "/"),
+                ("recursionLevel", "Full"),
+                ("includeContentMetadata", "false"),
+                ("versionDescriptor.version", commit_sha),
+                ("versionDescriptor.versionType", "commit"),
+                ("$format", "zip"),
+                ("download", "true"),
+                ("api-version", "7.1"),
+            ])
+            .timeout(Duration::from_secs(10 * 60))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await
+            .context("failed to download Azure repository archive")?;
+
+        Ok(response.to_vec())
     }
 }

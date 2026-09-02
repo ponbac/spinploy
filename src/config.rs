@@ -5,15 +5,10 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub dokploy_url: String,
-    pub project_id: String,
     pub environment_id: String,
-    pub custom_git_url: String,
-    pub custom_git_ssh_key_id: String,
-    pub compose_path: String,
     pub base_domain: String,
     pub frontend_service_name: String,
     pub frontend_port: u16,
-    pub backend_service_name: String,
     pub backend_port: u16,
     // Azure DevOps configuration for posting PR comments
     pub azdo_org: String,
@@ -31,6 +26,25 @@ pub struct Config {
     pub storage: Option<StorageConfig>,
     // Deployed Preview API path
     pub deployed_preview_api_path: String,
+    // VM-local Aspire preview builder settings
+    #[serde(default = "default_preview_work_dir")]
+    pub preview_work_dir: String,
+    #[serde(default = "default_preview_host_work_dir")]
+    pub preview_host_work_dir: String,
+    #[serde(default = "default_preview_host_cache_dir")]
+    pub preview_host_cache_dir: String,
+    #[serde(default = "default_preview_cache_dir")]
+    pub preview_cache_dir: String,
+    #[serde(default)]
+    pub preview_builder_image: Option<String>,
+    #[serde(default = "default_preview_apphost_path")]
+    pub preview_apphost_path: String,
+    #[serde(default = "default_preview_frontend_path")]
+    pub preview_frontend_path: String,
+    #[serde(default = "default_preview_build_timeout_secs")]
+    pub preview_build_timeout_secs: u64,
+    #[serde(default = "default_preview_readiness_timeout_secs")]
+    pub preview_readiness_timeout_secs: u64,
 }
 
 fn default_auth_cache_ttl() -> u64 {
@@ -39,6 +53,38 @@ fn default_auth_cache_ttl() -> u64 {
 
 fn default_auth_cache_negative_ttl() -> u64 {
     10
+}
+
+fn default_preview_work_dir() -> String {
+    "/data/previews".to_string()
+}
+
+fn default_preview_host_work_dir() -> String {
+    "/home/ponbac/shared/previews".to_string()
+}
+
+fn default_preview_host_cache_dir() -> String {
+    "/home/ponbac/shared/preview-cache".to_string()
+}
+
+fn default_preview_cache_dir() -> String {
+    "/data/preview-cache".to_string()
+}
+
+fn default_preview_apphost_path() -> String {
+    "LD.Apport.Backend/LD.Apport.AppHost/LD.Apport.AppHost.csproj".to_string()
+}
+
+fn default_preview_frontend_path() -> String {
+    "LD.Apport.Frontend".to_string()
+}
+
+fn default_preview_build_timeout_secs() -> u64 {
+    45 * 60
+}
+
+fn default_preview_readiness_timeout_secs() -> u64 {
+    10 * 60
 }
 
 #[derive(Debug, Deserialize, Clone)]

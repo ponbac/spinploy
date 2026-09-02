@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::models::dokploy::{
     Compose, ComposeDeployRequest, ComposeDetail, CreateComposeRequest, DeleteComposeRequest,
-    Domain, DomainCreateRequest, Project, UpdateComposeRequest,
+    Domain, DomainCreateRequest, Project, UpdateComposeRequest, UpdateRawComposeRequest,
 };
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
@@ -296,6 +296,15 @@ impl DokployClient {
 
     /// Update a compose definition.
     pub async fn update_compose(&self, api_key: &str, req: UpdateComposeRequest) -> Result<()> {
+        self.post_unit(api_key, "compose.update", req).await
+    }
+
+    /// Update a compose definition whose source is supplied directly rather than fetched by Dokploy.
+    pub async fn update_raw_compose(
+        &self,
+        api_key: &str,
+        req: UpdateRawComposeRequest,
+    ) -> Result<()> {
         self.post_unit(api_key, "compose.update", req).await
     }
 

@@ -2,12 +2,17 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::sse::{Event, KeepAlive, Sse},
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use futures_util::stream::Stream;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
+use url::Url;
 
 use crate::AppState;
 
@@ -53,6 +58,54 @@ fn build_pr_url(state: &AppState, pr_id: &str) -> String {
     )
 }
 
+async fn resolve_dashboard_login_url(
+    state: &AppState,
+    identifier: &str,
+    app_name: &str,
+    public_url: Option<String>,
+) -> Option<String> {
+    let public_url = public_url?;
+    let Some(docker_client) = &state.docker_client else {
+        return Some(public_url);
+    };
+    let container_name = get_container_name(app_name, "preview-dashboard");
+
+    match docker_client
+        .aspire_dashboard_login_token(&container_name)
+        .await
+    {
+        Ok(Some(token)) => match public_dashboard_login_url(&public_url, &token) {
+            Some(login_url) => Some(login_url),
+            None => {
+                tracing::warn!(identifier, "Aspire dashboard public URL is invalid");
+                Some(public_url)
+            }
+        },
+        Ok(None) => {
+            tracing::warn!(identifier, "Aspire dashboard browser token is unavailable");
+            Some(public_url)
+        }
+        Err(error) => {
+            tracing::warn!(
+                identifier,
+                error = %error,
+                "Failed to read Aspire dashboard browser token"
+            );
+            Some(public_url)
+        }
+    }
+}
+
+fn public_dashboard_login_url(public_url: &str, token: &SecretString) -> Option<String> {
+    let mut login_url = Url::parse(public_url).ok()?;
+    login_url.set_path("/login");
+    login_url.set_query(None);
+    login_url
+        .query_pairs_mut()
+        .append_pair("t", token.expose_secret());
+    Some(login_url.to_string())
+}
+
 /// Fetch PR title from Azure DevOps (cached for 10 minutes)
 async fn fetch_pr_title(state: &AppState, pr_id: &Option<String>) -> Option<String> {
     let pr_num = pr_id.as_ref()?;
@@ -88,17 +141,23 @@ async fn determine_preview_status(
     state: &AppState,
     compose_detail: &spinploy::models::dokploy::ComposeDetail,
     app_name: &str,
+    identifier: &str,
 ) -> PreviewStatus {
+    if let Some(status) = state.preview_deployer.status(identifier).await {
+        return match status {
+            spinploy::PreviewReconcileStatus::Building => PreviewStatus::Building,
+            spinploy::PreviewReconcileStatus::Running => PreviewStatus::Running,
+            spinploy::PreviewReconcileStatus::Failed => PreviewStatus::Failed,
+        };
+    }
+
     // Find the latest deployment by timestamp (Dokploy doesn't guarantee order)
-    let latest_deployment = compose_detail
-        .deployments
-        .iter()
-        .max_by_key(|d| {
-            d.finished_at
-                .as_ref()
-                .or(d.started_at.as_ref())
-                .or(d.created_at.as_ref())
-        });
+    let latest_deployment = compose_detail.deployments.iter().max_by_key(|d| {
+        d.finished_at
+            .as_ref()
+            .or(d.started_at.as_ref())
+            .or(d.created_at.as_ref())
+    });
 
     if let Some(latest_deployment) = latest_deployment {
         // Check deployment status from Dokploy (case-insensitive)
@@ -106,7 +165,13 @@ async fn determine_preview_status(
             match status.to_lowercase().as_str() {
                 "error" => return PreviewStatus::Failed,
                 "running" => return PreviewStatus::Building,
-                "done" => return PreviewStatus::Running,
+                "done" => {
+                    return if state.preview_deployer.is_ready(identifier).await {
+                        PreviewStatus::Running
+                    } else {
+                        PreviewStatus::Building
+                    };
+                }
                 _ => {} // Unknown status, fall through to container check
             }
         }
@@ -160,7 +225,7 @@ fn calculate_duration(started_at: &Option<String>, finished_at: &Option<String>)
 pub async fn list_previews(
     crate::ApiKey(api_key): crate::ApiKey,
     State(state): State<AppState>,
-) -> Result<Json<PreviewListResponse>, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let composes = state
         .dokploy_client
         .list_composes_with_prefix(&api_key, &state.config.environment_id, "preview-")
@@ -195,7 +260,7 @@ pub async fn list_previews(
             .ok();
 
         let status = if let Some(ref detail) = compose_detail {
-            determine_preview_status(&state, detail, &compose.app_name).await
+            determine_preview_status(&state, detail, &compose.app_name, &identifier).await
         } else {
             PreviewStatus::Unknown
         };
@@ -222,10 +287,15 @@ pub async fn list_previews(
             .find(|d| d.service_name == state.config.frontend_service_name)
             .map(|d| format!("https://{}", d.host));
 
-        let backend_url = domains
+        let backend_url = None;
+
+        let dashboard_url = domains
             .iter()
-            .find(|d| d.service_name == state.config.backend_service_name)
+            .find(|d| d.service_name == "preview-dashboard")
             .map(|d| format!("https://{}", d.host));
+        let dashboard_url =
+            resolve_dashboard_login_url(&state, &identifier, &compose.app_name, dashboard_url)
+                .await;
 
         let pr_url = pr_id.as_ref().map(|id| build_pr_url(&state, id));
         let pr_title = fetch_pr_title(&state, &pr_id).await;
@@ -239,18 +309,8 @@ pub async fn list_previews(
                 .into_iter()
                 .map(|c| {
                     let service = c
-                        .names
-                        .first()
-                        .and_then(|name| {
-                            // Extract service name from container name pattern: preview-{id}-{service}-1
-                            let parts: Vec<&str> =
-                                name.trim_start_matches('/').split('-').collect();
-                            if parts.len() >= 4 {
-                                Some(parts[parts.len() - 2].to_string())
-                            } else {
-                                None
-                            }
-                        })
+                        .compose_service
+                        .clone()
                         .unwrap_or_else(|| "unknown".to_string());
 
                     ContainerSummary {
@@ -283,6 +343,7 @@ pub async fn list_previews(
             last_deployed_at,
             frontend_url,
             backend_url,
+            dashboard_url,
             pr_url,
             containers,
         });
@@ -295,7 +356,10 @@ pub async fn list_previews(
         b_time.cmp(&a_time)
     });
 
-    Ok(Json(PreviewListResponse { previews }))
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+        Json(PreviewListResponse { previews }),
+    ))
 }
 
 /// GET /api/previews/{identifier} - Get detailed info for a specific preview
@@ -303,7 +367,7 @@ pub async fn get_preview_detail(
     crate::ApiKey(api_key): crate::ApiKey,
     State(state): State<AppState>,
     Path(identifier): Path<String>,
-) -> Result<Json<PreviewDetailResponse>, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let compose = state
         .dokploy_client
         .find_compose_by_name(&api_key, &identifier)
@@ -337,7 +401,8 @@ pub async fn get_preview_detail(
             )
         })?;
 
-    let status = determine_preview_status(&state, &compose_detail, &compose.app_name).await;
+    let status =
+        determine_preview_status(&state, &compose_detail, &compose.app_name, &identifier).await;
 
     let last_deployed_at = compose_detail.deployments.last().and_then(|dep| {
         dep.finished_at
@@ -358,10 +423,14 @@ pub async fn get_preview_detail(
         .find(|d| d.service_name == state.config.frontend_service_name)
         .map(|d| format!("https://{}", d.host));
 
-    let backend_url = domains
+    let backend_url = None;
+
+    let dashboard_url = domains
         .iter()
-        .find(|d| d.service_name == state.config.backend_service_name)
+        .find(|d| d.service_name == "preview-dashboard")
         .map(|d| format!("https://{}", d.host));
+    let dashboard_url =
+        resolve_dashboard_login_url(&state, &identifier, &compose.app_name, dashboard_url).await;
 
     let pr_url = pr_id.as_ref().map(|id| build_pr_url(&state, id));
     let pr_title = fetch_pr_title(&state, &pr_id).await;
@@ -375,16 +444,8 @@ pub async fn get_preview_detail(
             .into_iter()
             .map(|c| {
                 let service = c
-                    .names
-                    .first()
-                    .and_then(|name| {
-                        let parts: Vec<&str> = name.trim_start_matches('/').split('-').collect();
-                        if parts.len() >= 4 {
-                            Some(parts[parts.len() - 2].to_string())
-                        } else {
-                            None
-                        }
-                    })
+                    .compose_service
+                    .clone()
                     .unwrap_or_else(|| "unknown".to_string());
 
                 ContainerSummary {
@@ -432,14 +493,18 @@ pub async fn get_preview_detail(
         last_deployed_at,
         frontend_url,
         backend_url,
+        dashboard_url,
         pr_url,
         containers,
     };
 
-    Ok(Json(PreviewDetailResponse {
-        summary,
-        deployments,
-    }))
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+        Json(PreviewDetailResponse {
+            summary,
+            deployments,
+        }),
+    ))
 }
 
 /// GET /api/previews/{identifier}/containers/{service}/logs - Stream container logs via SSE
@@ -593,4 +658,24 @@ pub async fn stream_deployment_logs(
     });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::SecretString;
+
+    use super::*;
+
+    #[test]
+    fn creates_public_aspire_dashboard_login_url() {
+        let token = SecretString::from("test-token+value".to_string());
+
+        let login_url = public_dashboard_login_url("https://dashboard-pr-42.example.test", &token)
+            .expect("public dashboard URL should be valid");
+
+        assert_eq!(
+            login_url,
+            "https://dashboard-pr-42.example.test/login?t=test-token%2Bvalue"
+        );
+    }
 }
