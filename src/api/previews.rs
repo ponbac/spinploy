@@ -2,7 +2,10 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::sse::{Event, KeepAlive, Sse},
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use futures_util::stream::Stream;
 use secrecy::{ExposeSecret as _, SecretString};
@@ -222,7 +225,7 @@ fn calculate_duration(started_at: &Option<String>, finished_at: &Option<String>)
 pub async fn list_previews(
     crate::ApiKey(api_key): crate::ApiKey,
     State(state): State<AppState>,
-) -> Result<Json<PreviewListResponse>, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let composes = state
         .dokploy_client
         .list_composes_with_prefix(&api_key, &state.config.environment_id, "preview-")
@@ -353,7 +356,10 @@ pub async fn list_previews(
         b_time.cmp(&a_time)
     });
 
-    Ok(Json(PreviewListResponse { previews }))
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+        Json(PreviewListResponse { previews }),
+    ))
 }
 
 /// GET /api/previews/{identifier} - Get detailed info for a specific preview
@@ -361,7 +367,7 @@ pub async fn get_preview_detail(
     crate::ApiKey(api_key): crate::ApiKey,
     State(state): State<AppState>,
     Path(identifier): Path<String>,
-) -> Result<Json<PreviewDetailResponse>, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let compose = state
         .dokploy_client
         .find_compose_by_name(&api_key, &identifier)
@@ -492,10 +498,13 @@ pub async fn get_preview_detail(
         containers,
     };
 
-    Ok(Json(PreviewDetailResponse {
-        summary,
-        deployments,
-    }))
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+        Json(PreviewDetailResponse {
+            summary,
+            deployments,
+        }),
+    ))
 }
 
 /// GET /api/previews/{identifier}/containers/{service}/logs - Stream container logs via SSE
