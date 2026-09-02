@@ -10,7 +10,9 @@ pub mod slash_cmd;
 pub use config::Config;
 pub use dokploy_client::DokployClient;
 pub use models::dokploy::*;
-pub use preview_deployer::{PreviewDeployer, PreviewReconcileStatus, QueuedPreview};
+pub use preview_deployer::{
+    PreviewDeployer, PreviewReconcileSnapshot, PreviewReconcileStatus, QueuedPreview,
+};
 pub use slash_cmd::*;
 
 /// Computes the identifier for Dokploy preview deployments.

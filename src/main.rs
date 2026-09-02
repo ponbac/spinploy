@@ -1256,6 +1256,24 @@ mod tests {
         .expect("PR updated webhook response")
     }
 
+    async fn send_preview_api_request(state: AppState, uri: &str) -> axum::response::Response {
+        state
+            .auth_cache
+            .insert("dokploy-secret".to_string(), AuthDecision::Valid)
+            .await;
+        api::preview_routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-api-key", "dokploy-secret")
+                    .body(Body::empty())
+                    .expect("preview API request"),
+            )
+            .await
+            .expect("preview API response")
+    }
+
     fn timeline_record(name: &str, result: Option<&str>) -> AzureTimelineRecord {
         AzureTimelineRecord {
             name: name.to_string(),
@@ -1426,6 +1444,56 @@ mod tests {
         assert!(reply.contains("Preview building"));
         assert_eq!(fixture.deploy_requests.load(Ordering::SeqCst), 0);
         assert_eq!(fixture.delete_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_build_before_compose_is_visible_in_preview_api() {
+        let (dokploy_url, _fixture) =
+            spawn_dokploy_fixture(DokployDeleteBehavior::AlreadyAbsent).await;
+        let (azure_base_url, mut replies) = spawn_azure_reply_recorder().await;
+        let state = test_state(test_config(dokploy_url), &azure_base_url);
+
+        let response = send_pr_comment_webhook(state.clone(), "/preview").await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        tokio::time::timeout(Duration::from_secs(1), replies.recv())
+            .await
+            .expect("preview reply should finish")
+            .expect("Azure reply should be recorded");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.preview_deployer.status("pr-42").await
+                    == Some(spinploy::PreviewReconcileStatus::Failed)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("preview build should fail before creating a compose");
+
+        let response = send_preview_api_request(state.clone(), "/previews").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("preview list body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("preview list JSON");
+        let preview = &body["previews"][0];
+        assert_eq!(preview["identifier"], "pr-42");
+        assert_eq!(preview["branch"], "fix/delete");
+        assert_eq!(preview["status"], "Failed");
+        assert!(preview["composeId"].is_null());
+
+        let response = send_preview_api_request(state, "/previews/pr-42").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("preview detail body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("preview detail JSON");
+        assert_eq!(body["identifier"], "pr-42");
+        assert_eq!(body["status"], "Failed");
+        assert_eq!(body["deployments"], serde_json::json!([]));
     }
 
     #[tokio::test]

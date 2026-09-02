@@ -33,11 +33,20 @@ SMS_PASSWORD_XML=${{project.SMS_PASSWORD_XML}}
 VARA_PASSWORD=${{project.VARA_PASSWORD}}
 IMAGE_ANALYSIS_API_KEY=${{project.IMAGE_ANALYSIS_API_KEY}}"#;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreviewReconcileStatus {
     Building,
     Running,
     Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewReconcileSnapshot {
+    pub identifier: String,
+    pub git_branch: String,
+    pub pr_id: Option<String>,
+    pub status: PreviewReconcileStatus,
+    pub requested_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -69,7 +78,7 @@ pub struct PreviewDeployer {
     azure_client: Arc<AzureDevOpsClient>,
     dokploy_client: Arc<DokployClient>,
     queue: Mutex<QueueState>,
-    statuses: RwLock<HashMap<String, PreviewReconcileStatus>>,
+    statuses: RwLock<HashMap<String, PreviewReconcileSnapshot>>,
     operation_lock: Semaphore,
     readiness_client: reqwest::Client,
 }
@@ -168,6 +177,13 @@ impl PreviewDeployer {
     ) -> Result<Option<QueuedPreview>> {
         let identifier = crate::compute_identifier(&pr_id, &git_branch);
         validate_identifier(&identifier)?;
+        let snapshot = PreviewReconcileSnapshot {
+            identifier: identifier.clone(),
+            git_branch: git_branch.clone(),
+            pr_id: pr_id.clone(),
+            status: PreviewReconcileStatus::Building,
+            requested_at: chrono::Utc::now().to_rfc3339(),
+        };
 
         let should_start_worker = {
             let mut queue = self.queue.lock().await;
@@ -201,7 +217,7 @@ impl PreviewDeployer {
         self.statuses
             .write()
             .await
-            .insert(identifier.clone(), PreviewReconcileStatus::Building);
+            .insert(identifier.clone(), snapshot);
 
         if should_start_worker {
             let deployer = Arc::clone(self);
@@ -219,7 +235,19 @@ impl PreviewDeployer {
     }
 
     pub async fn status(&self, identifier: &str) -> Option<PreviewReconcileStatus> {
+        self.statuses
+            .read()
+            .await
+            .get(identifier)
+            .map(|snapshot| snapshot.status)
+    }
+
+    pub async fn snapshot(&self, identifier: &str) -> Option<PreviewReconcileSnapshot> {
         self.statuses.read().await.get(identifier).cloned()
+    }
+
+    pub async fn snapshots(&self) -> Vec<PreviewReconcileSnapshot> {
+        self.statuses.read().await.values().cloned().collect()
     }
 
     pub async fn is_ready(&self, identifier: &str) -> bool {
@@ -308,10 +336,9 @@ impl PreviewDeployer {
                     Ok(false) => PreviewReconcileStatus::Building,
                     Err(_) => PreviewReconcileStatus::Failed,
                 };
-                self.statuses
-                    .write()
-                    .await
-                    .insert(identifier.clone(), status);
+                if let Some(snapshot) = self.statuses.write().await.get_mut(&identifier) {
+                    snapshot.status = status;
+                }
             }
 
             match result {
