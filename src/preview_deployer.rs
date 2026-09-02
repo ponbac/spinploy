@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
+use serde_yaml::{Mapping, Value};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -357,6 +358,7 @@ impl PreviewDeployer {
         let compose_file = tokio::fs::read_to_string(&compose_path)
             .await
             .with_context(|| format!("failed to read {}", compose_path.display()))?;
+        let compose_file = normalize_compose_labels_for_dokploy(&compose_file)?;
         ensure!(
             compose_file.contains("spinploy.managed"),
             "generated Compose file is missing Spinploy ownership labels"
@@ -1018,6 +1020,51 @@ fn previews_to_remove_before_creation(existing_count: usize) -> usize {
         .saturating_sub(PREVIEW_LIMIT)
 }
 
+/// Dokploy only appends its Traefik labels when a Compose service's labels use
+/// list syntax. Aspire emits the equivalent mapping syntax, so normalise that
+/// representation at the integration boundary before uploading the document.
+fn normalize_compose_labels_for_dokploy(compose: &str) -> Result<String> {
+    let mut document: Value =
+        serde_yaml::from_str(compose).context("generated Compose file is invalid YAML")?;
+    let services = document
+        .get_mut("services")
+        .and_then(Value::as_mapping_mut)
+        .context("generated Compose file has no services mapping")?;
+
+    for service in services.values_mut() {
+        let Some(service) = service.as_mapping_mut() else {
+            continue;
+        };
+        let Some(labels) = service.get_mut("labels") else {
+            continue;
+        };
+        let Value::Mapping(mapping) = labels else {
+            continue;
+        };
+
+        *labels = Value::Sequence(compose_label_list(mapping)?);
+    }
+
+    serde_yaml::to_string(&document).context("failed to serialise generated Compose file")
+}
+
+fn compose_label_list(labels: &Mapping) -> Result<Vec<Value>> {
+    labels
+        .iter()
+        .map(|(key, value)| {
+            let key = key.as_str().context("Compose label key must be a string")?;
+            let value = match value {
+                Value::String(value) => value.clone(),
+                Value::Bool(value) => value.to_string(),
+                Value::Number(value) => value.to_string(),
+                Value::Null => String::new(),
+                _ => bail!("Compose label value for {key} must be a scalar"),
+            };
+            Ok(Value::String(format!("{key}={value}")))
+        })
+        .collect()
+}
+
 fn extract_zip_archive(archive_bytes: &[u8], destination: &Path) -> Result<()> {
     let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
         .context("Azure repository response is not a valid zip archive")?;
@@ -1076,5 +1123,55 @@ mod tests {
         assert_eq!(previews_to_remove_before_creation(2), 0);
         assert_eq!(previews_to_remove_before_creation(3), 1);
         assert_eq!(previews_to_remove_before_creation(4), 2);
+    }
+
+    #[test]
+    fn normalizes_aspire_label_mappings_for_dokploy() {
+        let compose = r#"
+services:
+  frontend:
+    image: preview-frontend:abc
+    labels:
+      spinploy.managed: "true"
+      spinploy.revision: abc
+  sql:
+    image: sql
+    labels:
+      spinploy.managed: true
+"#;
+
+        let normalized = normalize_compose_labels_for_dokploy(compose).unwrap();
+        let document: Value = serde_yaml::from_str(&normalized).unwrap();
+        let services = document["services"].as_mapping().unwrap();
+
+        assert_eq!(
+            services["frontend"]["labels"],
+            Value::Sequence(vec![
+                Value::String("spinploy.managed=true".to_string()),
+                Value::String("spinploy.revision=abc".to_string()),
+            ])
+        );
+        assert_eq!(
+            services["sql"]["labels"],
+            Value::Sequence(vec![Value::String("spinploy.managed=true".to_string())])
+        );
+    }
+
+    #[test]
+    fn preserves_existing_label_lists() {
+        let compose = r#"
+services:
+  frontend:
+    labels:
+      - spinploy.managed=true
+"#;
+
+        let normalized = normalize_compose_labels_for_dokploy(compose).unwrap();
+        let document: Value = serde_yaml::from_str(&normalized).unwrap();
+
+        assert_eq!(
+            document["services"]["frontend"]["labels"],
+            Value::Sequence(vec![Value::String("spinploy.managed=true".to_string())])
+        );
     }
 }

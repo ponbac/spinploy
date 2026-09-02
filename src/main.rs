@@ -556,7 +556,7 @@ async fn azure_pr_comment_webhook(
                     .await?;
 
             let identifier = spinploy::compute_identifier(&pr_id, &branch);
-            let frontend = format!("https://{}.{}", identifier, &config.base_domain);
+            let frontend = format!("https://{}.{}", identifier, config.base_domain);
             if let Err(e) = azure_client
                 .reply_in_thread(
                     repo_id,
