@@ -583,9 +583,16 @@ async fn azure_pr_comment_webhook(
                 let reply = match preview_deployer.delete(&api_key, &identifier).await {
                     Ok(true) => "🗑️ Preview deleted".to_string(),
                     Ok(false) => "🗑️ Preview was already absent".to_string(),
-                    Err(_) => format!(
-                        "⚠️ Could not delete preview `{identifier}`. Please try `/delete` again."
-                    ),
+                    Err(error) => {
+                        tracing::error!(
+                            identifier,
+                            error = %error,
+                            "Preview deletion from Azure PR comment failed"
+                        );
+                        format!(
+                            "⚠️ Could not delete preview `{identifier}`. Please try `/delete` again."
+                        )
+                    }
                 };
 
                 if let Err(error) = azure_client
@@ -1003,6 +1010,7 @@ mod tests {
         Succeeds,
         Fails,
         AlreadyAbsent,
+        TransientConfirmationFailure,
     }
 
     struct DokployFixture {
@@ -1038,7 +1046,13 @@ mod tests {
             .route(
                 "/project.all",
                 get(|State(fixture): State<Arc<DokployFixture>>| async move {
-                    fixture.project_requests.fetch_add(1, Ordering::SeqCst);
+                    let request = fixture.project_requests.fetch_add(1, Ordering::SeqCst) + 1;
+                    if fixture.behavior == DokployDeleteBehavior::TransientConfirmationFailure
+                        && request == 2
+                    {
+                        return (StatusCode::BAD_GATEWAY, "transient Dokploy failure")
+                            .into_response();
+                    }
                     let composes = if fixture.present.load(Ordering::SeqCst) {
                         vec![serde_json::json!({
                             "composeId": "compose-id",
@@ -1060,6 +1074,7 @@ mod tests {
                             "compose": composes
                         }]
                     }]))
+                    .into_response()
                 }),
             )
             .route(
@@ -1070,7 +1085,9 @@ mod tests {
                         DokployDeleteBehavior::Fails => {
                             (StatusCode::BAD_GATEWAY, "Dokploy unavailable")
                         }
-                        DokployDeleteBehavior::Succeeds | DokployDeleteBehavior::AlreadyAbsent => {
+                        DokployDeleteBehavior::Succeeds
+                        | DokployDeleteBehavior::AlreadyAbsent
+                        | DokployDeleteBehavior::TransientConfirmationFailure => {
                             fixture.present.store(false, Ordering::SeqCst);
                             (StatusCode::OK, "")
                         }
@@ -1348,6 +1365,25 @@ mod tests {
             .expect("Azure reply should be recorded");
         assert_eq!(reply, "🗑️ Preview deleted");
         assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.delete_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_comment_tolerates_a_transient_confirmation_failure() {
+        let (dokploy_url, fixture) =
+            spawn_dokploy_fixture(DokployDeleteBehavior::TransientConfirmationFailure).await;
+        let (azure_base_url, mut replies) = spawn_azure_reply_recorder().await;
+        let state = test_state(test_config(dokploy_url), &azure_base_url);
+
+        let response = send_pr_comment_webhook(state, "/delete").await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let reply = tokio::time::timeout(Duration::from_secs(2), replies.recv())
+            .await
+            .expect("background deletion should finish")
+            .expect("Azure reply should be recorded");
+        assert_eq!(reply, "🗑️ Preview deleted");
+        assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 3);
         assert_eq!(fixture.delete_requests.load(Ordering::SeqCst), 1);
     }
 

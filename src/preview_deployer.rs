@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use crate::azure_client::AzureDevOpsClient;
 use crate::config::Config;
 use crate::dokploy_client::DokployClient;
-use crate::models::dokploy::{DomainCreateRequest, UpdateRawComposeRequest};
+use crate::models::dokploy::{Compose, DomainCreateRequest, UpdateRawComposeRequest};
 
 const PREVIEW_LIMIT: usize = 3;
 const PROJECT_ENVIRONMENT: &str = r#"COOKIE_DOMAIN=${{project.COOKIE_DOMAIN}}
@@ -253,6 +253,7 @@ impl PreviewDeployer {
             return deletion;
         }
         let deleted = deletion.expect("successful deletion contains its outcome");
+        self.cleanup_preview_networks(identifier).await;
         self.remove_preview_workspace(identifier).await;
         self.cleanup_preview_images(identifier, None).await;
         let remove_status = {
@@ -606,6 +607,7 @@ aspire do prepare-preview \
     ) -> Result<String> {
         self.delete_compose_if_present(&job.api_key, &job.identifier)
             .await?;
+        self.cleanup_preview_networks(&job.identifier).await;
 
         let app_name = format!("preview-{}", job.identifier);
         let compose = self
@@ -689,31 +691,29 @@ aspire do prepare-preview \
     }
 
     async fn delete_compose_if_present(&self, api_key: &str, identifier: &str) -> Result<bool> {
-        let Some(compose) = self
-            .dokploy_client
-            .find_compose_by_name(api_key, identifier)
-            .await?
-        else {
+        let Some(compose) = self.find_compose_with_retry(api_key, identifier).await? else {
             return Ok(false);
         };
 
         let mut last_error = None;
         for attempt in 1..=3 {
-            last_error = self
+            let delete_error = self
                 .dokploy_client
                 .delete_compose(api_key, &compose.compose_id, true)
                 .await
                 .err();
-
-            let poll_count = if last_error.is_some() { 2 } else { 20 };
+            let poll_count = if delete_error.is_some() { 2 } else { 20 };
+            if let Some(error) = delete_error {
+                last_error = Some(error);
+            }
             for _ in 0..poll_count {
-                if self
-                    .dokploy_client
-                    .find_compose_by_name(api_key, identifier)
-                    .await?
-                    .is_none()
-                {
-                    return Ok(true);
+                match self.find_compose_with_retry(api_key, identifier).await {
+                    Ok(None) => return Ok(true),
+                    Ok(Some(_)) => {}
+                    Err(error) => {
+                        last_error = Some(error.context("failed to confirm Compose deletion"));
+                        break;
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -727,6 +727,40 @@ aspire do prepare-preview \
             Some(error) => Err(error.context("Dokploy compose deletion failed")),
             None => bail!("Dokploy compose still exists after deletion"),
         }
+    }
+
+    async fn find_compose_with_retry(
+        &self,
+        api_key: &str,
+        identifier: &str,
+    ) -> Result<Option<Compose>> {
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            match self
+                .dokploy_client
+                .find_compose_by_name(api_key, identifier)
+                .await
+            {
+                Ok(compose) => return Ok(compose),
+                Err(error) => {
+                    tracing::warn!(
+                        identifier,
+                        attempt,
+                        error = %error,
+                        "Dokploy Compose lookup failed"
+                    );
+                    last_error = Some(error);
+                }
+            }
+
+            if attempt < 3 {
+                tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
+            }
+        }
+
+        Err(last_error
+            .expect("a failed retry loop records its last error")
+            .context("Dokploy Compose lookup failed after retries"))
     }
 
     async fn wait_until_ready(&self, job: &PreviewJob, revision: &str) -> Result<bool> {
@@ -813,6 +847,7 @@ aspire do prepare-preview \
                 self.finish_pruned_preview(&compose.name).await;
                 return Err(error);
             }
+            self.cleanup_preview_networks(&compose.name).await;
             self.remove_preview_workspace(&compose.name).await;
             self.cleanup_preview_images(&compose.name, None).await;
             self.finish_pruned_preview(&compose.name).await;
@@ -859,6 +894,93 @@ aspire do prepare-preview \
                 error = %error,
                 "Failed to remove preview workspace"
             );
+        }
+    }
+
+    async fn cleanup_preview_networks(&self, identifier: &str) {
+        if let Err(error) = validate_identifier(identifier) {
+            tracing::warn!(identifier, error = %error, "Refusing to remove networks for an invalid preview identifier");
+            return;
+        }
+
+        let output = match Command::new("docker")
+            .args(["network", "ls", "--format", "{{.Name}}"])
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => output,
+            Ok(_) | Err(_) => {
+                tracing::warn!(identifier, "Failed to list stale preview networks");
+                return;
+            }
+        };
+        let Ok(networks) = String::from_utf8(output.stdout) else {
+            tracing::warn!(identifier, "Docker returned non-UTF-8 network names");
+            return;
+        };
+
+        for network in networks
+            .lines()
+            .filter(|network| is_preview_network_name(identifier, network))
+        {
+            let members = match docker_network_members(network).await {
+                Ok(members) => members,
+                Err(error) => {
+                    tracing::warn!(identifier, network, error = %error, "Failed to inspect stale preview network");
+                    continue;
+                }
+            };
+            let unrelated_members = members
+                .iter()
+                .filter(|member| member.as_str() != "dokploy-traefik")
+                .cloned()
+                .collect::<Vec<_>>();
+            if !unrelated_members.is_empty() {
+                tracing::warn!(
+                    identifier,
+                    network,
+                    members = ?unrelated_members,
+                    "Refusing to remove a preview network with unrelated containers"
+                );
+                continue;
+            }
+
+            if members.iter().any(|member| member == "dokploy-traefik") {
+                let status = Command::new("docker")
+                    .args([
+                        "network",
+                        "disconnect",
+                        "--force",
+                        network,
+                        "dokploy-traefik",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+                if !matches!(status, Ok(status) if status.success()) {
+                    tracing::warn!(
+                        identifier,
+                        network,
+                        "Failed to disconnect Dokploy Traefik from stale preview network"
+                    );
+                    continue;
+                }
+            }
+
+            let status = Command::new("docker")
+                .args(["network", "rm", network])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+            if !matches!(status, Ok(status) if status.success()) {
+                tracing::warn!(
+                    identifier,
+                    network,
+                    "Failed to remove stale preview network"
+                );
+            }
         }
     }
 
@@ -1020,6 +1142,38 @@ fn previews_to_remove_before_creation(existing_count: usize) -> usize {
         .saturating_sub(PREVIEW_LIMIT)
 }
 
+fn is_preview_network_name(identifier: &str, network: &str) -> bool {
+    network
+        .strip_prefix(&format!("preview-{identifier}-"))
+        .is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .chars()
+                    .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+        })
+}
+
+async fn docker_network_members(network: &str) -> Result<Vec<String>> {
+    let output = Command::new("docker")
+        .args([
+            "network",
+            "inspect",
+            "--format",
+            "{{range .Containers}}{{println .Name}}{{end}}",
+            network,
+        ])
+        .output()
+        .await
+        .with_context(|| format!("failed to inspect Docker network {network}"))?;
+    ensure!(
+        output.status.success(),
+        "Docker could not inspect network {network}"
+    );
+    let members =
+        String::from_utf8(output.stdout).context("Docker returned non-UTF-8 network members")?;
+    Ok(members.lines().map(str::to_string).collect())
+}
+
 /// Dokploy only appends its Traefik labels when a Compose service's labels use
 /// list syntax. Aspire emits the equivalent mapping syntax, so normalise that
 /// representation at the integration boundary before uploading the document.
@@ -1123,6 +1277,15 @@ mod tests {
         assert_eq!(previews_to_remove_before_creation(2), 0);
         assert_eq!(previews_to_remove_before_creation(3), 1);
         assert_eq!(previews_to_remove_before_creation(4), 2);
+    }
+
+    #[test]
+    fn matches_only_isolated_networks_for_the_exact_preview() {
+        assert!(is_preview_network_name("pr-42", "preview-pr-42-hh9avq"));
+        assert!(!is_preview_network_name("pr-42", "preview-pr-42-"));
+        assert!(!is_preview_network_name("pr-42", "preview-pr-420-hh9avq"));
+        assert!(!is_preview_network_name("pr-42", "preview-pr-42-unsafe_"));
+        assert!(!is_preview_network_name("pr-42", "preview-pr-42-HH9AVQ"));
     }
 
     #[test]
