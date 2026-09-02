@@ -1171,7 +1171,16 @@ async fn docker_network_members(network: &str) -> Result<Vec<String>> {
     );
     let members =
         String::from_utf8(output.stdout).context("Docker returned non-UTF-8 network members")?;
-    Ok(members.lines().map(str::to_string).collect())
+    Ok(parse_docker_network_members(&members))
+}
+
+fn parse_docker_network_members(members: &str) -> Vec<String> {
+    members
+        .lines()
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Dokploy only appends its Traefik labels when a Compose service's labels use
@@ -1286,6 +1295,15 @@ mod tests {
         assert!(!is_preview_network_name("pr-42", "preview-pr-420-hh9avq"));
         assert!(!is_preview_network_name("pr-42", "preview-pr-42-unsafe_"));
         assert!(!is_preview_network_name("pr-42", "preview-pr-42-HH9AVQ"));
+    }
+
+    #[test]
+    fn ignores_blank_docker_network_members() {
+        assert!(parse_docker_network_members("\n").is_empty());
+        assert_eq!(
+            parse_docker_network_members("dokploy-traefik\n\n"),
+            vec!["dokploy-traefik"]
+        );
     }
 
     #[test]
