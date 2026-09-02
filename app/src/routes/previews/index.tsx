@@ -204,7 +204,7 @@ function PreviewsPage() {
 																className="block text-sm font-mono text-violet-400 hover:text-violet-300 break-all"
 																onClick={(e) => e.stopPropagation()}
 															>
-																→ Aspire: {preview.dashboardUrl}
+																→ Open Aspire dashboard
 															</a>
 														)}
 													</div>

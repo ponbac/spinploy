@@ -5,9 +5,11 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures_util::stream::Stream;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
+use url::Url;
 
 use crate::AppState;
 
@@ -51,6 +53,54 @@ fn build_pr_url(state: &AppState, pr_id: &str) -> String {
         "https://dev.azure.com/{}/{}/_git/{}/pullrequest/{}",
         state.config.azdo_org, state.config.azdo_project, state.config.azdo_repository_id, pr_id
     )
+}
+
+async fn resolve_dashboard_login_url(
+    state: &AppState,
+    identifier: &str,
+    app_name: &str,
+    public_url: Option<String>,
+) -> Option<String> {
+    let public_url = public_url?;
+    let Some(docker_client) = &state.docker_client else {
+        return Some(public_url);
+    };
+    let container_name = get_container_name(app_name, "preview-dashboard");
+
+    match docker_client
+        .aspire_dashboard_login_token(&container_name)
+        .await
+    {
+        Ok(Some(token)) => match public_dashboard_login_url(&public_url, &token) {
+            Some(login_url) => Some(login_url),
+            None => {
+                tracing::warn!(identifier, "Aspire dashboard public URL is invalid");
+                Some(public_url)
+            }
+        },
+        Ok(None) => {
+            tracing::warn!(identifier, "Aspire dashboard browser token is unavailable");
+            Some(public_url)
+        }
+        Err(error) => {
+            tracing::warn!(
+                identifier,
+                error = %error,
+                "Failed to read Aspire dashboard browser token"
+            );
+            Some(public_url)
+        }
+    }
+}
+
+fn public_dashboard_login_url(public_url: &str, token: &SecretString) -> Option<String> {
+    let mut login_url = Url::parse(public_url).ok()?;
+    login_url.set_path("/login");
+    login_url.set_query(None);
+    login_url
+        .query_pairs_mut()
+        .append_pair("t", token.expose_secret());
+    Some(login_url.to_string())
 }
 
 /// Fetch PR title from Azure DevOps (cached for 10 minutes)
@@ -240,6 +290,9 @@ pub async fn list_previews(
             .iter()
             .find(|d| d.service_name == "preview-dashboard")
             .map(|d| format!("https://{}", d.host));
+        let dashboard_url =
+            resolve_dashboard_login_url(&state, &identifier, &compose.app_name, dashboard_url)
+                .await;
 
         let pr_url = pr_id.as_ref().map(|id| build_pr_url(&state, id));
         let pr_title = fetch_pr_title(&state, &pr_id).await;
@@ -370,6 +423,8 @@ pub async fn get_preview_detail(
         .iter()
         .find(|d| d.service_name == "preview-dashboard")
         .map(|d| format!("https://{}", d.host));
+    let dashboard_url =
+        resolve_dashboard_login_url(&state, &identifier, &compose.app_name, dashboard_url).await;
 
     let pr_url = pr_id.as_ref().map(|id| build_pr_url(&state, id));
     let pr_title = fetch_pr_title(&state, &pr_id).await;
@@ -594,4 +649,24 @@ pub async fn stream_deployment_logs(
     });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::SecretString;
+
+    use super::*;
+
+    #[test]
+    fn creates_public_aspire_dashboard_login_url() {
+        let token = SecretString::from("test-token+value".to_string());
+
+        let login_url = public_dashboard_login_url("https://dashboard-pr-42.example.test", &token)
+            .expect("public dashboard URL should be valid");
+
+        assert_eq!(
+            login_url,
+            "https://dashboard-pr-42.example.test/login?t=test-token%2Bvalue"
+        );
+    }
 }

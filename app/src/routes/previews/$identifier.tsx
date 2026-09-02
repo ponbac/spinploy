@@ -242,7 +242,7 @@ function PreviewDetailPage() {
 											rel="noopener noreferrer"
 											className="block text-sm font-mono text-violet-400 hover:text-violet-300 break-all"
 										>
-											→ Aspire: {data.dashboardUrl}
+											→ Open Aspire dashboard
 										</a>
 									) : null}
 								</div>
