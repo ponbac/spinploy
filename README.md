@@ -116,7 +116,12 @@ curl -H "x-storage-token: $STORAGE_TOKEN" \
   - Status change to `completed` or `abandoned`: delete the preview and its volumes
 - POST `/webhooks/azure/build-completed` —
   - Expects Azure DevOps `build.completed` service hook payloads
-  - If the build failed because one or more tracked Playwright E2E runs failed (`Run main E2E tests`, `Run journal template E2E tests`; legacy `Run E2E tests` also supported), posts a Slack Incoming Webhook message including the commit author name and build link
+  - If the build failed because one or more tracked E2E / acceptance test steps failed, posts a Slack Incoming Webhook message naming the pipeline, the stage(s) and step(s) that failed, the commit author and the build link
+  - Tracked step names (exact `displayName` match):
+    - "LD.Apport Aspire Release": `Run Aspire UAT Lerum acceptance tests` (the only environment with `runAcceptanceTests: true` today), plus `Run Aspire UAT Vara acceptance tests`, `Run Aspire Production Lerum acceptance tests` and `Run Aspire Production Vara acceptance tests` so enabling them needs no change
+    - Legacy "LD.Apport E2E & Release": `Run main E2E tests`, `Run journal template E2E tests`, `Run E2E tests`
+  - Supporting steps such as `Publish E2E JUnit` are not tracked, and failures outside the tracked steps (for example in "Validate release") never alert
+  - Duplicate alerts are suppressed when every failing step also failed the last time it ran on the same pipeline and branch; earlier builds where a step was skipped or never scheduled are looked past
 
 All API calls must include the API key as described in Authentication.
 

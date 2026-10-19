@@ -133,6 +133,10 @@ pub struct AzureBuildTimeline {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AzureTimelineRecord {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
     pub name: String,
     #[serde(default)]
     pub result: Option<String>,
