@@ -175,9 +175,9 @@ Dynamic environment variables (per-preview) are prefixed directly, while project
 
 **Build Completed** (`/webhooks/azure/build-completed`)
 
-- Detects tracked Playwright E2E run failures (`Run main E2E tests`, `Run journal template E2E tests`; legacy `Run E2E tests` still supported)
-- Checks recent build history to suppress duplicate alerts
-- Fetches commit author and posts Slack message with build link
+- Detects failures of tracked E2E / acceptance test steps by exact name (`TRACKED_E2E_RUN_NAMES` in src/main.rs): `Run Aspire {UAT,Production} {Lerum,Vara} acceptance tests` from "LD.Apport Aspire Release", and legacy `Run main E2E tests`, `Run journal template E2E tests`, `Run E2E tests`. Generic steps like `Publish E2E JUnit` are intentionally untracked
+- Checks recent build history to suppress duplicate alerts: each failing step is judged by the newest previous build where it actually ran (skipped steps, e.g. after a "Validate release" failure, are looked past)
+- Fetches commit author and posts a Slack message with the pipeline, failed stage(s) (resolved via timeline `parentId`), failed steps and build link
 
 ### Authentication Strategy
 
