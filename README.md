@@ -121,6 +121,7 @@ curl -H "x-storage-token: $STORAGE_TOKEN" \
     - "LD.Apport Aspire Release": `Run Aspire UAT Lerum acceptance tests` (the only environment with `runAcceptanceTests: true` today), plus `Run Aspire UAT Vara acceptance tests`, `Run Aspire Production Lerum acceptance tests` and `Run Aspire Production Vara acceptance tests` so enabling them needs no change
     - Legacy "LD.Apport E2E & Release": `Run main E2E tests`, `Run journal template E2E tests`, `Run E2E tests`
   - Supporting steps such as `Publish E2E JUnit` are not tracked, and failures outside the tracked steps (for example in "Validate release") never alert
+  - Failed steps that finished more than 6 hours before the build completed are ignored. A release build stays in progress until its production approvals are answered, and an unanswered approval only times out after 30 days, so without this a month-old failure would be reported as new
   - Duplicate alerts are suppressed when every failing step also failed the last time it ran on the same pipeline and branch; earlier builds where a step was skipped or never scheduled are looked past
 
 All API calls must include the API key as described in Authentication.

@@ -144,6 +144,8 @@ pub struct AzureTimelineRecord {
     pub record_type: Option<String>,
     #[serde(default)]
     pub state: Option<String>,
+    #[serde(default)]
+    pub finish_time: Option<String>,
 }
 
 // Azure DevOps REST: commit detail
