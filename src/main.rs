@@ -64,6 +64,14 @@ const TRACKED_E2E_RUN_NAMES: [&str; 7] = [
 
 type TrackedE2eRuns = BTreeSet<&'static str>;
 
+/// Failures that finished longer than this before their build completed are not reported.
+///
+/// A release build stays in progress until every production approval is answered, and Azure
+/// DevOps only times an unanswered approval out after 30 days, so `build.complete` can arrive a
+/// month after the tests failed. Legitimate completions follow the tests within minutes, or hours
+/// when production is approved the same day.
+const STALE_E2E_FAILURE_AGE: chrono::TimeDelta = chrono::TimeDelta::hours(6);
+
 fn tracked_e2e_run_name(name: &str) -> Option<&'static str> {
     TRACKED_E2E_RUN_NAMES
         .iter()
@@ -130,6 +138,15 @@ fn timeline_stage_name<'a>(
 struct FailedE2eRun<'a> {
     name: &'static str,
     stage: Option<&'a str>,
+    finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl FailedE2eRun<'_> {
+    /// An unknown finish time counts as recent, so a missing field never hides a failure.
+    fn is_stale(&self, build_completed_at: chrono::DateTime<chrono::Utc>) -> bool {
+        self.finished_at
+            .is_some_and(|finished_at| build_completed_at - finished_at > STALE_E2E_FAILURE_AGE)
+    }
 }
 
 /// Tracked E2E runs that failed in `timeline`, ordered as in `TRACKED_E2E_RUN_NAMES`.
@@ -139,6 +156,7 @@ fn failed_e2e_runs(timeline: &AzureBuildTimeline) -> Vec<FailedE2eRun<'_>> {
         .map(|(name, record)| FailedE2eRun {
             name,
             stage: timeline_stage_name(timeline, record),
+            finished_at: record.finish_time.as_deref().and_then(parse_ts),
         })
         .collect();
     runs.sort_by_key(|run| tracked_e2e_run_order(run.name));
@@ -916,7 +934,25 @@ async fn azure_build_completed_webhook(
             )
         })?;
 
-    let failed_runs = failed_e2e_runs(&timeline);
+    // Measured against the build's completion rather than the clock, so a webhook that Azure
+    // DevOps redelivers hours later (e.g. after a Spinploy outage) is still judged on its build.
+    let build_completed_at = build
+        .finish_time
+        .as_deref()
+        .and_then(parse_ts)
+        .unwrap_or_else(chrono::Utc::now);
+    let (stale_runs, failed_runs): (Vec<_>, Vec<_>) = failed_e2e_runs(&timeline)
+        .into_iter()
+        .partition(|run| run.is_stale(build_completed_at));
+
+    if !stale_runs.is_empty() {
+        tracing::info!(
+            build_id,
+            build_number = build.build_number.as_deref().unwrap_or(""),
+            stale_runs = ?stale_runs,
+            "Ignoring tracked E2E failures that finished long before the build completed"
+        );
+    }
 
     if failed_runs.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
@@ -1432,6 +1468,7 @@ mod tests {
             result: result.map(str::to_string),
             record_type: None,
             state: None,
+            finish_time: None,
         }
     }
 
@@ -1516,6 +1553,28 @@ mod tests {
         ]);
 
         assert!(failed_e2e_runs(&timeline).is_empty());
+    }
+
+    #[test]
+    fn failures_that_finished_long_before_the_event_are_stale() {
+        // Build 41336: the tests failed on 21 September, but the build only completed a month
+        // later, when an unanswered production approval timed out.
+        let timeline = timeline([
+            AzureTimelineRecord {
+                finish_time: Some("2026-09-21T14:01:12.1866667Z".to_string()),
+                ..timeline_record(ASPIRE_UAT_LERUM_ACCEPTANCE_RUN_NAME, Some("failed"))
+            },
+            timeline_record(MAIN_E2E_RUN_NAME, Some("failed")),
+        ]);
+        let at = |timestamp: &str| parse_ts(timestamp).expect("valid timestamp");
+        let [finish_unknown, lerum_run] = failed_e2e_runs(&timeline)
+            .try_into()
+            .expect("two failed runs");
+
+        assert!(lerum_run.is_stale(at("2026-10-21T13:51:42Z")));
+        assert!(lerum_run.is_stale(at("2026-09-21T20:01:13Z")));
+        assert!(!lerum_run.is_stale(at("2026-09-21T20:01:12Z")));
+        assert!(!finish_unknown.is_stale(at("2026-10-21T13:51:42Z")));
     }
 
     #[test]
