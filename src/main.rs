@@ -64,7 +64,7 @@ const TRACKED_E2E_RUN_NAMES: [&str; 7] = [
 
 type TrackedE2eRuns = BTreeSet<&'static str>;
 
-/// Failures that finished longer ago than this are not reported when their build completes.
+/// Failures that finished longer than this before their build completed are not reported.
 ///
 /// A release build stays in progress until every production approval is answered, and Azure
 /// DevOps only times an unanswered approval out after 30 days, so `build.complete` can arrive a
@@ -143,9 +143,9 @@ struct FailedE2eRun<'a> {
 
 impl FailedE2eRun<'_> {
     /// An unknown finish time counts as recent, so a missing field never hides a failure.
-    fn is_stale(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+    fn is_stale(&self, build_completed_at: chrono::DateTime<chrono::Utc>) -> bool {
         self.finished_at
-            .is_some_and(|finished_at| now - finished_at > STALE_E2E_FAILURE_AGE)
+            .is_some_and(|finished_at| build_completed_at - finished_at > STALE_E2E_FAILURE_AGE)
     }
 }
 
@@ -934,10 +934,16 @@ async fn azure_build_completed_webhook(
             )
         })?;
 
-    let now = chrono::Utc::now();
+    // Measured against the build's completion rather than the clock, so a webhook that Azure
+    // DevOps redelivers hours later (e.g. after a Spinploy outage) is still judged on its build.
+    let build_completed_at = build
+        .finish_time
+        .as_deref()
+        .and_then(parse_ts)
+        .unwrap_or_else(chrono::Utc::now);
     let (stale_runs, failed_runs): (Vec<_>, Vec<_>) = failed_e2e_runs(&timeline)
         .into_iter()
-        .partition(|run| run.is_stale(now));
+        .partition(|run| run.is_stale(build_completed_at));
 
     if !stale_runs.is_empty() {
         tracing::info!(

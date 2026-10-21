@@ -102,6 +102,8 @@ pub struct AzureBuildDetail {
     pub links: Option<AzureBuildLinks>,
     #[serde(default)]
     pub result: Option<String>,
+    #[serde(default)]
+    pub finish_time: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
