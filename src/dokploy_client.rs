@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::models::dokploy::{
     Compose, ComposeDeployRequest, ComposeDetail, CreateComposeRequest, DeleteComposeRequest,
-    Domain, DomainCreateRequest, Project, UpdateComposeRequest, UpdateRawComposeRequest,
+    Domain, DomainCreateRequest, ProjectSummary, UpdateComposeRequest, UpdateRawComposeRequest,
 };
 use anyhow::{Context, Result, bail};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::try_join_all};
 use regress::Regex;
 use reqwest::Response;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -211,10 +211,16 @@ impl DokployClient {
             .await?)
     }
 
-    /// Retrieve all projects with nested environments and compose definitions.
-    pub async fn fetch_projects(&self, api_key: impl AsRef<str>) -> Result<Vec<Project>> {
-        self.get::<Vec<Project>>(api_key.as_ref(), "project.all")
+    /// Retrieve all projects with their environments and compose summaries.
+    pub async fn fetch_projects(&self, api_key: impl AsRef<str>) -> Result<Vec<ProjectSummary>> {
+        self.get::<Vec<ProjectSummary>>(api_key.as_ref(), "project.all")
             .await
+    }
+
+    /// Fetch the full compose record (compose.one).
+    pub async fn get_compose(&self, api_key: &str, compose_id: &str) -> Result<Compose> {
+        let url = format!("compose.one?composeId={compose_id}");
+        self.get::<Compose>(api_key, &url).await
     }
 
     pub async fn find_compose_by_name(
@@ -222,31 +228,25 @@ impl DokployClient {
         api_key: impl AsRef<str> + std::fmt::Debug,
         compose_name: impl AsRef<str> + std::fmt::Debug,
     ) -> Result<Option<Compose>> {
+        let api_key = api_key.as_ref();
         let projects = self.fetch_projects(api_key).await?;
 
-        let matching_composes: Vec<_> = projects
+        let matching_ids: Vec<_> = projects
             .into_iter()
             .flat_map(|project| project.environments.into_iter())
             .flat_map(|env| env.compose.into_iter())
             .filter(|compose| compose.name == compose_name.as_ref())
+            .map(|compose| compose.compose_id)
             .collect();
 
-        match matching_composes.len() {
-            0 => Ok(None),
-            1 => Ok(Some(
-                matching_composes
-                    .into_iter()
-                    .next()
-                    .expect("single compose found"),
-            )),
-            _ => {
-                let ids: Vec<_> = matching_composes.iter().map(|c| &*c.compose_id).collect();
-                bail!(
-                    "multiple composes named {:?} found with IDs {:?}",
-                    compose_name.as_ref(),
-                    ids
-                )
-            }
+        match matching_ids.as_slice() {
+            [] => Ok(None),
+            [compose_id] => Ok(Some(self.get_compose(api_key, compose_id).await?)),
+            _ => bail!(
+                "multiple composes named {:?} found with IDs {:?}",
+                compose_name.as_ref(),
+                matching_ids
+            ),
         }
     }
 
@@ -352,19 +352,24 @@ impl DokployClient {
         app_name_prefix: &str,
     ) -> Result<Vec<Compose>> {
         let projects = self.fetch_projects(api_key).await?;
-        let mut comps = Vec::new();
-        for project in projects.into_iter() {
-            for env in project.environments.into_iter() {
-                if env.environment_id == environment_id {
-                    comps.extend(
-                        env.compose
-                            .into_iter()
-                            .filter(|c| c.app_name.starts_with(app_name_prefix)),
-                    );
-                }
-            }
-        }
-        Ok(comps)
+        let compose_ids = projects
+            .into_iter()
+            .flat_map(|project| project.environments.into_iter())
+            .filter(|env| env.environment_id == environment_id)
+            .flat_map(|env| env.compose.into_iter())
+            .map(|compose| compose.compose_id);
+
+        // The project listing has no app names, so each compose in the
+        // environment is fetched to apply the prefix filter.
+        let composes = try_join_all(
+            compose_ids
+                .map(|compose_id| async move { self.get_compose(api_key, &compose_id).await }),
+        )
+        .await?;
+        Ok(composes
+            .into_iter()
+            .filter(|c| c.app_name.starts_with(app_name_prefix))
+            .collect())
     }
 
     /// Fetch a compose detail (compose.one)
@@ -534,6 +539,118 @@ mod tests {
         assert!(error.contains("<truncated>"));
         assert!(!error.contains(api_key));
         assert!(error.len() < ERROR_RESPONSE_BODY_LIMIT + 256);
+    }
+
+    /// Dokploy v0.31+ `project.all` only lists ids, names and statuses for each
+    /// compose; `compose.one` carries the full record.
+    fn dokploy_v031_api() -> Router {
+        use axum::{Json, extract::Query, routing::get};
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        let compose_one = |id: &str, name: &str, app_name: &str, environment_id: &str| {
+            json!({
+                "composeId": id,
+                "name": name,
+                "appName": app_name,
+                "environmentId": environment_id,
+                "createdAt": "2026-11-06T10:00:00.000Z",
+                "composeStatus": "done",
+                "domains": [{
+                    "domainId": format!("{id}-domain"),
+                    "host": format!("{name}.example.test"),
+                    "serviceName": "frontend",
+                    "composeId": id,
+                }],
+                "deployments": [],
+            })
+        };
+        let composes: HashMap<String, serde_json::Value> = [
+            compose_one("c-preview", "pr-1", "preview-pr-1-abc123", "env-previews"),
+            compose_one(
+                "c-other",
+                "tooling",
+                "compose-tooling-def456",
+                "env-previews",
+            ),
+            compose_one("c-elsewhere", "pr-2", "preview-pr-2-ghi789", "env-other"),
+        ]
+        .into_iter()
+        .map(|c| (c["composeId"].as_str().unwrap().to_string(), c))
+        .collect();
+
+        let summary =
+            |id: &str, name: &str| json!({"composeId": id, "name": name, "composeStatus": "done"});
+        let projects = json!([{
+            "projectId": "p-1",
+            "name": "previews",
+            "organizationId": "org-1",
+            "environments": [
+                {
+                    "environmentId": "env-previews",
+                    "name": "production",
+                    "isDefault": true,
+                    "applications": [],
+                    "compose": [summary("c-preview", "pr-1"), summary("c-other", "tooling")],
+                },
+                {
+                    "environmentId": "env-other",
+                    "name": "staging",
+                    "isDefault": false,
+                    "applications": [],
+                    "compose": [summary("c-elsewhere", "pr-2")],
+                },
+            ],
+        }]);
+
+        Router::new()
+            .route("/project.all", get(move || async move { Json(projects) }))
+            .route(
+                "/compose.one",
+                get(
+                    move |Query(query): Query<HashMap<String, String>>| async move {
+                        match query.get("composeId").and_then(|id| composes.get(id)) {
+                            Some(compose) => Ok(Json(compose.clone())),
+                            None => Err(StatusCode::NOT_FOUND),
+                        }
+                    },
+                ),
+            )
+    }
+
+    #[tokio::test]
+    async fn finds_compose_by_name_from_dokploy_v031_project_summaries() {
+        let client = DokployClient::new(spawn_test_server(dokploy_v031_api()).await);
+
+        let compose = client
+            .find_compose_by_name("known-api-key", "pr-1")
+            .await
+            .expect("lookup should succeed")
+            .expect("pr-1 exists");
+
+        assert_eq!(compose.compose_id, "c-preview");
+        assert_eq!(compose.app_name, "preview-pr-1-abc123");
+        assert_eq!(compose.environment_id, "env-previews");
+        assert_eq!(compose.domains[0].host, "pr-1.example.test");
+
+        let missing = client
+            .find_compose_by_name("known-api-key", "pr-404")
+            .await
+            .expect("lookup should succeed");
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn lists_prefixed_composes_in_environment_from_dokploy_v031_project_summaries() {
+        let client = DokployClient::new(spawn_test_server(dokploy_v031_api()).await);
+
+        let composes = client
+            .list_composes_with_prefix("known-api-key", "env-previews", "preview-")
+            .await
+            .expect("listing should succeed");
+
+        let ids: Vec<_> = composes.iter().map(|c| c.compose_id.as_str()).collect();
+        assert_eq!(ids, ["c-preview"]);
     }
 
     #[tokio::test]

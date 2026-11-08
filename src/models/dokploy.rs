@@ -1,25 +1,36 @@
 use serde::{Deserialize, Serialize};
 
+/// A project as listed by `project.all`.
+///
+/// Since Dokploy v0.31 the listing only carries ids, names and statuses for
+/// nested services, so it is used to locate composes; full records come from
+/// `compose.one`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Project {
+pub struct ProjectSummary {
     pub project_id: String,
     pub name: String,
-    pub organization_id: String,
     #[serde(default)]
-    pub environments: Vec<Environment>,
+    pub environments: Vec<EnvironmentSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Environment {
+pub struct EnvironmentSummary {
     pub environment_id: String,
     pub name: String,
-    pub project_id: String,
     #[serde(default)]
-    pub compose: Vec<Compose>,
+    pub compose: Vec<ComposeSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeSummary {
+    pub compose_id: String,
+    pub name: String,
+}
+
+/// A full compose record, as returned by `compose.one` and `compose.create`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Compose {
