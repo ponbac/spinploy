@@ -1239,12 +1239,12 @@ mod tests {
                         return (StatusCode::BAD_GATEWAY, "transient Dokploy failure")
                             .into_response();
                     }
+                    // Dokploy v0.31+ lists only compose summaries here.
                     let composes = if fixture.present.load(Ordering::SeqCst) {
                         vec![serde_json::json!({
                             "composeId": "compose-id",
                             "name": "pr-42",
-                            "appName": "preview-pr-42",
-                            "environmentId": "environment-id"
+                            "composeStatus": "done"
                         })]
                     } else {
                         vec![]
@@ -1256,10 +1256,27 @@ mod tests {
                         "environments": [{
                             "environmentId": "environment-id",
                             "name": "test",
-                            "projectId": "project-id",
                             "compose": composes
                         }]
                     }]))
+                    .into_response()
+                }),
+            )
+            .route(
+                "/compose.one",
+                get(|State(fixture): State<Arc<DokployFixture>>| async move {
+                    if !fixture.present.load(Ordering::SeqCst) {
+                        return (StatusCode::NOT_FOUND, "compose not found").into_response();
+                    }
+                    Json(serde_json::json!({
+                        "composeId": "compose-id",
+                        "name": "pr-42",
+                        "appName": "preview-pr-42",
+                        "environmentId": "environment-id",
+                        "createdAt": "2026-11-06T10:00:00.000Z",
+                        "domains": [],
+                        "deployments": []
+                    }))
                     .into_response()
                 }),
             )
