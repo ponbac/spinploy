@@ -114,15 +114,16 @@ curl -H "x-storage-token: $STORAGE_TOKEN" \
 - POST `/webhooks/azure/pr-updated` —
   - Active PR targeting `main` or `master`: rebuild the exact source commit only when a preview was previously requested with `/preview`
   - Status change to `completed` or `abandoned`: delete the preview and its volumes
-- POST `/webhooks/azure/build-completed` —
-  - Expects Azure DevOps `build.completed` service hook payloads
-  - If the build failed because one or more tracked E2E / acceptance test steps failed, posts a Slack Incoming Webhook message naming the pipeline, the stage(s) and step(s) that failed, the commit author and the build link
+- POST `/webhooks/azure/stage-completed` —
+  - Expects Azure DevOps `ms.vss-pipelines.stage-state-changed-event` service hook payloads with stage state `completed` and result `failed`
+  - Alerts as soon as a stage's tracked E2E / acceptance test steps fail, even while other stages wait for production approval. Each regressing failed stage attempt gets its own Slack message naming the pipeline, stage, failed steps, commit author and build link
+  - Matches the event's `resource.stage.name` to the timeline Stage's YAML `identifier`; the event's stage GUID and display name are not used for matching
   - Tracked step names (exact `displayName` match):
     - "LD.Apport Aspire Release": `Run Aspire UAT Lerum acceptance tests` (the only environment with `runAcceptanceTests: true` today), plus `Run Aspire UAT Vara acceptance tests`, `Run Aspire Production Lerum acceptance tests` and `Run Aspire Production Vara acceptance tests` so enabling them needs no change
     - Legacy "LD.Apport E2E & Release": `Run main E2E tests`, `Run journal template E2E tests`, `Run E2E tests`
   - Supporting steps such as `Publish E2E JUnit` are not tracked, and failures outside the tracked steps (for example in "Validate release") never alert
-  - Failed steps that finished more than 6 hours before the build completed are ignored. A release build stays in progress until its production approvals are answered, and an unanswered approval only times out after 30 days, so without this a month-old failure would be reported as new
-  - Duplicate alerts are suppressed when every failing step also failed the last time it ran on the same pipeline and branch; earlier builds where a step was skipped or never scheduled are looked past
+  - Repeat failures are suppressed when every failing step also failed the last time it ran on the same pipeline and branch. History includes releases still waiting for approval, ordered by queue time and bounded by the current build's queue time; steps that were skipped or never scheduled are looked past (up to 10 builds)
+  - If history is unavailable, including a missing queue time, the alert is sent. Retrying a failed stage can alert again; webhook redeliveries are not deduplicated
 
 All API calls must include the API key as described in Authentication.
 
@@ -180,6 +181,15 @@ Service hooks:
 - Pull request updated — create two subscriptions, both to `/webhooks/azure/pr-updated`:
   - Settings: `notificationType = PushNotification` — Queue the latest exact source commit only when that PR already has a preview
   - Settings: `notificationType = StatusUpdateNotification` — Delete previews when matching PRs are completed or abandoned
+
+- Run stage state changed — use one subscription per pipeline, sent to `/webhooks/azure/stage-completed`:
+  - Publisher: `pipelines`; event: `ms.vss-pipelines.stage-state-changed-event`; resource version: `5.1-preview.1`
+  - Pipeline (`pipelineId`): `LD.Apport Aspire Release` (ID `22` in Lerum)
+  - Stage (`stageNameId`): Any; state (`stageStateId`): `Completed`; result (`stageResultId`): `Failed`
+  - Authentication: Dokploy API key as the HTTP Basic password (username may be empty), or `x-api-key` for clients supporting custom headers
+  - Only tracked test failures within the event's stage alert; failures in unrelated stages do not alert
+
+See [Microsoft's stage hook payload and filters](https://learn.microsoft.com/en-us/azure/devops/service-hooks/events?view=azure-devops#run-stage-state-changed).
 
 Preview creation is always manual through `/preview`. Before a new preview starts building,
 Spinploy removes the oldest preview when all three preview slots are occupied. `/delete`
