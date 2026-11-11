@@ -64,14 +64,6 @@ const TRACKED_E2E_RUN_NAMES: [&str; 7] = [
 
 type TrackedE2eRuns = BTreeSet<&'static str>;
 
-/// Failures that finished longer than this before their build completed are not reported.
-///
-/// A release build stays in progress until every production approval is answered, and Azure
-/// DevOps only times an unanswered approval out after 30 days, so `build.complete` can arrive a
-/// month after the tests failed. Legitimate completions follow the tests within minutes, or hours
-/// when production is approved the same day.
-const STALE_E2E_FAILURE_AGE: chrono::TimeDelta = chrono::TimeDelta::hours(6);
-
 fn tracked_e2e_run_name(name: &str) -> Option<&'static str> {
     TRACKED_E2E_RUN_NAMES
         .iter()
@@ -109,12 +101,12 @@ fn tracked_e2e_records(
     })
 }
 
-/// Name of the stage a timeline record belongs to, found by walking `parentId`
+/// Stage a timeline record belongs to, found by walking `parentId`
 /// (Task → Job → Phase → Stage).
-fn timeline_stage_name<'a>(
+fn timeline_stage<'a>(
     timeline: &'a AzureBuildTimeline,
     record: &'a AzureTimelineRecord,
-) -> Option<&'a str> {
+) -> Option<&'a AzureTimelineRecord> {
     let mut current = record;
     // Bounded by the record count so a malformed, cyclic timeline cannot loop forever.
     for _ in 0..timeline.records.len() {
@@ -123,7 +115,7 @@ fn timeline_stage_name<'a>(
             .as_deref()
             .is_some_and(|record_type| record_type.eq_ignore_ascii_case("Stage"));
         if is_stage {
-            return Some(&current.name);
+            return Some(current);
         }
         let parent_id = current.parent_id.as_deref()?;
         current = timeline
@@ -138,25 +130,20 @@ fn timeline_stage_name<'a>(
 struct FailedE2eRun<'a> {
     name: &'static str,
     stage: Option<&'a str>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl FailedE2eRun<'_> {
-    /// An unknown finish time counts as recent, so a missing field never hides a failure.
-    fn is_stale(&self, build_completed_at: chrono::DateTime<chrono::Utc>) -> bool {
-        self.finished_at
-            .is_some_and(|finished_at| build_completed_at - finished_at > STALE_E2E_FAILURE_AGE)
-    }
+    stage_identifier: Option<&'a str>,
 }
 
 /// Tracked E2E runs that failed in `timeline`, ordered as in `TRACKED_E2E_RUN_NAMES`.
 fn failed_e2e_runs(timeline: &AzureBuildTimeline) -> Vec<FailedE2eRun<'_>> {
     let mut runs: Vec<_> = tracked_e2e_records(timeline)
         .filter(|(_, record)| is_failed_result(record.result.as_deref()))
-        .map(|(name, record)| FailedE2eRun {
-            name,
-            stage: timeline_stage_name(timeline, record),
-            finished_at: record.finish_time.as_deref().and_then(parse_ts),
+        .map(|(name, record)| {
+            let stage = timeline_stage(timeline, record);
+            FailedE2eRun {
+                name,
+                stage: stage.map(|stage| stage.name.as_str()),
+                stage_identifier: stage.and_then(|stage| stage.identifier.as_deref()),
+            }
         })
         .collect();
     runs.sort_by_key(|run| tracked_e2e_run_order(run.name));
@@ -467,10 +454,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(healthz))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
-        .route(
-            "/webhooks/azure/build-completed",
-            post(azure_build_completed_webhook),
-        )
+        .merge(e2e_alert_routes())
         .nest("/api", api_routes)
         .fallback_service(serve_frontend)
         .with_state(state.clone())
@@ -882,46 +866,37 @@ async fn azure_pr_updated_webhook(
     }
 }
 
-async fn azure_build_completed_webhook(
+fn e2e_alert_routes() -> Router<AppState> {
+    Router::new().route(
+        "/webhooks/azure/stage-completed",
+        post(azure_stage_completed_webhook),
+    )
+}
+
+async fn azure_stage_completed_webhook(
     State(AppState {
         azure_client,
         slack_client,
         ..
     }): State<AppState>,
     ApiKey(_api_key): ApiKey,
-    Json(payload): Json<AzureBuildCompletedEvent>,
+    Json(payload): Json<AzureStageStateChangedEvent>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let event_ok = payload.event_type.eq_ignore_ascii_case("build.complete")
-        || payload.event_type.eq_ignore_ascii_case("build.completed");
-    if !event_ok {
+    if !payload
+        .event_type
+        .eq_ignore_ascii_case("ms.vss-pipelines.stage-state-changed-event")
+        || !payload
+            .resource
+            .stage
+            .state
+            .eq_ignore_ascii_case("completed")
+        || !is_failed_result(payload.resource.stage.result.as_deref())
+    {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
-    let build_id = payload.resource.id;
-
-    let build = azure_client.get_build(build_id).await.map_err(|e| {
-        tracing::error!(error = %e, build_id, "Failed to fetch build details");
-        (
-            StatusCode::BAD_GATEWAY,
-            "failed to fetch build details".to_string(),
-        )
-    })?;
-
-    let build_failed = payload
-        .resource
-        .result
-        .as_deref()
-        .map(|r| r.eq_ignore_ascii_case("failed"))
-        .unwrap_or(false)
-        || build
-            .result
-            .as_deref()
-            .map(|r| r.eq_ignore_ascii_case("failed"))
-            .unwrap_or(false);
-
-    if !build_failed {
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    }
+    let build_id = payload.resource.run.id;
+    let stage_name = &payload.resource.stage.name;
 
     let timeline = azure_client
         .get_build_timeline(build_id)
@@ -934,29 +909,46 @@ async fn azure_build_completed_webhook(
             )
         })?;
 
-    // Measured against the build's completion rather than the clock, so a webhook that Azure
-    // DevOps redelivers hours later (e.g. after a Spinploy outage) is still judged on its build.
-    let build_completed_at = build
-        .finish_time
-        .as_deref()
-        .and_then(parse_ts)
-        .unwrap_or_else(chrono::Utc::now);
-    let (stale_runs, failed_runs): (Vec<_>, Vec<_>) = failed_e2e_runs(&timeline)
-        .into_iter()
-        .partition(|run| run.is_stale(build_completed_at));
-
-    if !stale_runs.is_empty() {
-        tracing::info!(
+    let stage_found = timeline.records.iter().any(|record| {
+        record
+            .record_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("Stage"))
+            && record
+                .identifier
+                .as_deref()
+                .is_some_and(|identifier| identifier.eq_ignore_ascii_case(stage_name))
+    });
+    if !stage_found {
+        tracing::warn!(
             build_id,
-            build_number = build.build_number.as_deref().unwrap_or(""),
-            stale_runs = ?stale_runs,
-            "Ignoring tracked E2E failures that finished long before the build completed"
+            stage_name,
+            "Event stage missing from build timeline"
         );
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "event stage missing from build timeline".to_string(),
+        ));
     }
 
+    let failed_runs: Vec<_> = failed_e2e_runs(&timeline)
+        .into_iter()
+        .filter(|run| {
+            run.stage_identifier
+                .is_some_and(|identifier| identifier.eq_ignore_ascii_case(stage_name))
+        })
+        .collect();
     if failed_runs.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
+
+    let build = azure_client.get_build(build_id).await.map_err(|e| {
+        tracing::error!(error = %e, build_id, "Failed to fetch build details");
+        (
+            StatusCode::BAD_GATEWAY,
+            "failed to fetch build details".to_string(),
+        )
+    })?;
 
     tracing::info!(
         build_id,
@@ -966,12 +958,13 @@ async fn azure_build_completed_webhook(
     );
 
     // If we cannot check history, proceed to send (per user request).
-    if let (Some(definition_id), Some(branch_name)) = (
+    if let (Some(definition_id), Some(branch_name), Some(queue_time)) = (
         build.definition.as_ref().map(|d| d.id),
         build.source_branch.as_deref(),
+        build.queue_time.as_deref(),
     ) {
         match azure_client
-            .list_builds(definition_id, branch_name, 10)
+            .list_prior_builds(definition_id, branch_name, queue_time, 10)
             .await
         {
             Ok(recent) => {
@@ -1040,7 +1033,8 @@ async fn azure_build_completed_webhook(
             build_id,
             has_definition = build.definition.is_some(),
             has_branch = build.source_branch.is_some(),
-            "Missing definition or branch; proceeding to send Slack without regression check"
+            has_queue_time = build.queue_time.is_some(),
+            "Missing history query inputs; proceeding to send Slack without regression check"
         );
     }
 
@@ -1477,6 +1471,211 @@ mod tests {
             .expect("preview API response")
     }
 
+    // Azure and Slack are real local HTTP servers. The current build deliberately has no
+    // result: its E2E stage is done, but production is still waiting for approval.
+    async fn e2e_alert_fixture(
+        current_timeline: serde_json::Value,
+        previous_result: &str,
+    ) -> (
+        AppState,
+        mpsc::UnboundedReceiver<serde_json::Value>,
+        mpsc::UnboundedReceiver<HashMap<String, String>>,
+    ) {
+        let (queries_tx, queries_rx) = mpsc::unbounded_channel();
+        let previous_timeline = serde_json::json!({"records": [{
+            "name": ASPIRE_UAT_LERUM_ACCEPTANCE_RUN_NAME,
+            "result": previous_result
+        }]});
+        let azure = Router::new()
+            .route(
+                "/organization/project/_apis/build/builds/42",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "id": 42, "status": "inProgress", "result": null,
+                        "sourceVersion": "commit-sha", "sourceBranch": "refs/heads/main",
+                        "queueTime": "2026-11-11T10:00:00Z",
+                        "definition": {"id": 22, "name": "LD.Apport Aspire Release"},
+                        "repository": {"id": "repository-id"}, "buildNumber": "release-42",
+                        "_links": {"web": {"href": "https://example.test/build/42"}}
+                    }))
+                }),
+            )
+            .route(
+                "/organization/project/_apis/build/builds/42/timeline",
+                get(move || {
+                    let timeline = current_timeline.clone();
+                    async move { Json(timeline) }
+                }),
+            )
+            .route(
+                "/organization/project/_apis/build/builds",
+                get(move |Query(query): Query<HashMap<String, String>>| {
+                    let queries_tx = queries_tx.clone();
+                    async move {
+                        queries_tx.send(query).expect("record history query");
+                        Json(serde_json::json!({"value": [{"id": 42}, {"id": 41}]}))
+                    }
+                }),
+            )
+            .route(
+                "/organization/project/_apis/build/builds/41/timeline",
+                get(move || {
+                    let timeline = previous_timeline.clone();
+                    async move { Json(timeline) }
+                }),
+            )
+            .route(
+                "/organization/project/_apis/git/repositories/repository-id/commits/commit-sha",
+                get(|| async { Json(serde_json::json!({"author": {"name": "Ada Lovelace"}})) }),
+            );
+        let azure_url = spawn_test_server(azure).await;
+        let (messages_tx, messages_rx) = mpsc::unbounded_channel();
+        let slack_url = spawn_test_server(Router::new().route(
+            "/slack",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let messages_tx = messages_tx.clone();
+                async move {
+                    messages_tx.send(body).expect("record Slack message");
+                    StatusCode::OK
+                }
+            }),
+        ))
+        .await;
+        let mut config = test_config("http://127.0.0.1:1".to_string());
+        config.slack_webhook_url = format!("{slack_url}/slack");
+        let state = test_state(config, &azure_url);
+        state
+            .auth_cache
+            .insert("dokploy-secret".to_string(), AuthDecision::Valid)
+            .await;
+        (state, messages_rx, queries_rx)
+    }
+
+    fn e2e_stage_timeline(step: &str) -> serde_json::Value {
+        serde_json::json!({"records": [
+            {"id": "stage-guid", "identifier": "Deploy_UAT_Lerum", "type": "Stage",
+             "name": "Deploy Aspire UAT Lerum", "state": "completed", "result": "failed"},
+            {"id": "task-guid", "parentId": "stage-guid", "type": "Task",
+             "name": step, "state": "completed", "result": "failed"},
+            {"id": "validate-guid", "identifier": "Validate", "type": "Stage",
+             "name": "Validate release", "state": "completed", "result": "failed"},
+            {"id": "other-stage-guid", "identifier": "Deploy_Production_Vara", "type": "Stage",
+             "name": "Deploy Aspire Production Vara", "state": "pending", "result": null}
+        ]})
+    }
+
+    async fn send_stage_event(state: AppState, stage: &str) -> axum::response::Response {
+        // Shape from Microsoft's stage-state-changed example; its GUID is deliberately not
+        // the timeline GUID. The YAML stage name is the shared identifier.
+        let body = serde_json::json!({
+            "eventType": "ms.vss-pipelines.stage-state-changed-event",
+            "resource": {
+                "stage": {"id": "event-stage-guid", "name": stage, "state": "completed", "result": "failed"},
+                "run": {"id": 42, "state": "inProgress", "result": null}
+            }
+        });
+        e2e_alert_routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/azure/stage-completed")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", "dokploy-secret")
+                    .body(Body::from(body.to_string()))
+                    .expect("stage webhook request"),
+            )
+            .await
+            .expect("stage webhook response")
+    }
+
+    #[tokio::test]
+    async fn stage_failure_alerts_while_release_waits_for_approval() {
+        let (state, mut messages, mut queries) = e2e_alert_fixture(
+            e2e_stage_timeline(ASPIRE_UAT_LERUM_ACCEPTANCE_RUN_NAME),
+            "succeeded",
+        )
+        .await;
+        let response = send_stage_event(state, "Deploy_UAT_Lerum").await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let message = messages
+            .try_recv()
+            .expect("Slack alert before production approval");
+        let text = message["text"].as_str().expect("Slack text");
+        assert!(text.contains("Deploy Aspire UAT Lerum"));
+        assert!(text.contains(ASPIRE_UAT_LERUM_ACCEPTANCE_RUN_NAME));
+        assert!(text.contains("Ada Lovelace"));
+        assert!(text.contains("https://example.test/build/42"));
+        assert!(!text.contains("Production Vara"));
+        let query = queries.try_recv().expect("Azure history query");
+        assert_eq!(query.get("definitions").map(String::as_str), Some("22"));
+        assert_eq!(
+            query.get("branchName").map(String::as_str),
+            Some("refs/heads/main")
+        );
+        assert_eq!(
+            query.get("maxTime").map(String::as_str),
+            Some("2026-11-11T10:00:00Z")
+        );
+        assert_eq!(
+            query.get("queryOrder").map(String::as_str),
+            Some("queueTimeDescending")
+        );
+        assert!(!query.contains_key("statusFilter"));
+    }
+
+    #[tokio::test]
+    async fn stage_alert_ignores_other_stages_and_untracked_steps() {
+        for (step, event_stage) in [
+            (ASPIRE_UAT_LERUM_ACCEPTANCE_RUN_NAME, "Validate"),
+            ("Publish E2E JUnit", "Deploy_UAT_Lerum"),
+        ] {
+            let (state, mut messages, mut queries) =
+                e2e_alert_fixture(e2e_stage_timeline(step), "succeeded").await;
+            assert_eq!(
+                send_stage_event(state, event_stage).await.status(),
+                StatusCode::NO_CONTENT
+            );
+            assert!(messages.try_recv().is_err(), "no unrelated Slack alert");
+            assert!(
+                queries.try_recv().is_err(),
+                "no history lookup without test failures"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_alert_suppresses_repeated_failure_in_a_release_awaiting_approval() {
+        let (state, mut messages, mut queries) = e2e_alert_fixture(
+            e2e_stage_timeline(ASPIRE_UAT_LERUM_ACCEPTANCE_RUN_NAME),
+            "failed",
+        )
+        .await;
+        assert_eq!(
+            send_stage_event(state, "Deploy_UAT_Lerum").await.status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            queries.try_recv().is_ok(),
+            "history checked despite pending production approval"
+        );
+        assert!(messages.try_recv().is_err(), "repeat failure suppressed");
+    }
+
+    #[tokio::test]
+    async fn stage_missing_from_timeline_is_retryable() {
+        let (state, mut messages, _) = e2e_alert_fixture(
+            e2e_stage_timeline(ASPIRE_UAT_LERUM_ACCEPTANCE_RUN_NAME),
+            "succeeded",
+        )
+        .await;
+        assert_eq!(
+            send_stage_event(state, "Unknown_Stage").await.status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert!(messages.try_recv().is_err());
+    }
+
     fn timeline_record(name: &str, result: Option<&str>) -> AzureTimelineRecord {
         AzureTimelineRecord {
             id: None,
@@ -1484,8 +1683,7 @@ mod tests {
             name: name.to_string(),
             result: result.map(str::to_string),
             record_type: None,
-            state: None,
-            finish_time: None,
+            identifier: None,
         }
     }
 
@@ -1570,28 +1768,6 @@ mod tests {
         ]);
 
         assert!(failed_e2e_runs(&timeline).is_empty());
-    }
-
-    #[test]
-    fn failures_that_finished_long_before_the_event_are_stale() {
-        // Build 41336: the tests failed on 21 September, but the build only completed a month
-        // later, when an unanswered production approval timed out.
-        let timeline = timeline([
-            AzureTimelineRecord {
-                finish_time: Some("2026-09-21T14:01:12.1866667Z".to_string()),
-                ..timeline_record(ASPIRE_UAT_LERUM_ACCEPTANCE_RUN_NAME, Some("failed"))
-            },
-            timeline_record(MAIN_E2E_RUN_NAME, Some("failed")),
-        ]);
-        let at = |timestamp: &str| parse_ts(timestamp).expect("valid timestamp");
-        let [finish_unknown, lerum_run] = failed_e2e_runs(&timeline)
-            .try_into()
-            .expect("two failed runs");
-
-        assert!(lerum_run.is_stale(at("2026-10-21T13:51:42Z")));
-        assert!(lerum_run.is_stale(at("2026-09-21T20:01:13Z")));
-        assert!(!lerum_run.is_stale(at("2026-09-21T20:01:12Z")));
-        assert!(!finish_unknown.is_stale(at("2026-10-21T13:51:42Z")));
     }
 
     #[test]

@@ -173,12 +173,14 @@ Dynamic environment variables (per-preview) are prefixed directly, while project
 - Push notifications: Redeploy existing preview if present
 - Status change to `completed` with target=main: Delete preview
 
-**Build Completed** (`/webhooks/azure/build-completed`)
+**Stage Completed** (`/webhooks/azure/stage-completed`)
 
-- Detects failures of tracked E2E / acceptance test steps by exact name (`TRACKED_E2E_RUN_NAMES` in src/main.rs): `Run Aspire {UAT,Production} {Lerum,Vara} acceptance tests` from "LD.Apport Aspire Release", and legacy `Run main E2E tests`, `Run journal template E2E tests`, `Run E2E tests`. Generic steps like `Publish E2E JUnit` are intentionally untracked
-- Ignores failed steps that finished more than `STALE_E2E_FAILURE_AGE` (6h) before the event: release builds wait on production approvals that only time out after 30 days, so `build.complete` can arrive a month after the tests failed
-- Checks recent build history to suppress duplicate alerts: each failing step is judged by the newest previous build where it actually ran (skipped steps, e.g. after a "Validate release" failure, are looked past)
-- Fetches commit author and posts a Slack message with the pipeline, failed stage(s) (resolved via timeline `parentId`), failed steps and build link
+- Handles `ms.vss-pipelines.stage-state-changed-event` when the stage is completed/failed; the build itself can still be in progress waiting for production approval
+- Matches the event's `resource.stage.name` to the timeline Stage `identifier` (YAML name), case-insensitively. A missing stage returns 502 so the mismatch is visible in the service hook delivery history
+- Detects tracked E2E / acceptance test step failures by exact name (`TRACKED_E2E_RUN_NAMES` in src/main.rs), scoped to that stage. Generic steps like `Publish E2E JUnit` are intentionally untracked
+- Checks up to 10 builds on the same pipeline and branch, including releases awaiting approval, ordered by queue time with `maxTime` set to the current build's queue time. Looks past skipped steps; history errors or missing query inputs fail open and send the alert
+- Sends one Slack message per regressing failed stage attempt, including stage, step, commit author and build link. Failed reruns may alert again; webhook redeliveries are not deduplicated
+- Configure one completed/failed stage hook per pipeline with API-key authentication; see README for the publisher, filters and resource version
 
 ### Authentication Strategy
 

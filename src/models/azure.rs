@@ -67,19 +67,30 @@ pub struct AzurePrUpdatedResource {
     pub status: Option<String>,
 }
 
-// Azure DevOps build.completed webhook payload
+// Azure DevOps pipelines stage-state-changed service hook payload.
 #[derive(Debug, Deserialize)]
-pub struct AzureBuildCompletedEvent {
+pub struct AzureStageStateChangedEvent {
     #[serde(rename = "eventType")]
     pub event_type: String,
-    pub resource: AzureBuildResource,
+    pub resource: AzureStageResource,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AzureBuildResource {
+pub struct AzureStageResource {
+    pub run: AzureRun,
+    pub stage: AzureStage,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureRun {
     pub id: u64,
-    #[serde(default)]
-    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureStage {
+    /// YAML stage name; matches a Stage timeline record's identifier, not its display name.
+    pub name: String,
+    pub state: String,
     #[serde(default)]
     pub result: Option<String>,
 }
@@ -101,9 +112,7 @@ pub struct AzureBuildDetail {
     #[serde(default, rename = "_links")]
     pub links: Option<AzureBuildLinks>,
     #[serde(default)]
-    pub result: Option<String>,
-    #[serde(default)]
-    pub finish_time: Option<String>,
+    pub queue_time: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,9 +154,7 @@ pub struct AzureTimelineRecord {
     #[serde(default, rename = "type")]
     pub record_type: Option<String>,
     #[serde(default)]
-    pub state: Option<String>,
-    #[serde(default)]
-    pub finish_time: Option<String>,
+    pub identifier: Option<String>,
 }
 
 // Azure DevOps REST: commit detail

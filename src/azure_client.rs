@@ -71,7 +71,7 @@ impl AzureDevOpsClient {
         Ok(())
     }
 
-    /// Fetch build details to obtain sourceVersion, repository id, build number and result.
+    /// Fetch build details for alert content and the queue-time history bound.
     pub async fn get_build(&self, build_id: u64) -> Result<AzureBuildDetail> {
         let url = format!(
             "{}/{}/{}/_apis/build/builds/{}?api-version=7.1-preview.7",
@@ -131,11 +131,13 @@ impl AzureDevOpsClient {
         Ok(resp)
     }
 
-    /// List recent completed builds for a given definition and branch, newest first.
-    pub async fn list_builds(
+    /// List builds queued before the current one, including releases awaiting approvals.
+    /// Queue order plus maxTime keeps later builds out even when events arrive late.
+    pub async fn list_prior_builds(
         &self,
         definition_id: u64,
         branch_name: &str,
+        queued_before: &str,
         top: u64,
     ) -> Result<Vec<AzureBuildListItem>> {
         let url = format!(
@@ -150,8 +152,8 @@ impl AzureDevOpsClient {
             .query(&[
                 ("definitions", definition_id.to_string()),
                 ("branchName", branch_name.to_string()),
-                ("statusFilter", "completed".to_string()),
-                ("queryOrder", "finishTimeDescending".to_string()),
+                ("maxTime", queued_before.to_string()),
+                ("queryOrder", "queueTimeDescending".to_string()),
                 ("$top", top.to_string()),
             ])
             .send()
