@@ -24,8 +24,11 @@ RUN cargo build --release --bin spinploy
 
 FROM node:22-bookworm-slim AS node-runtime
 FROM docker:28-cli AS docker-cli
+FROM mcr.microsoft.com/dotnet/sdk:11.0.100 AS dotnet-11
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS runtime
+# Keep .NET 10 for older preview AppHosts while adding .NET 11 support.
+COPY --from=dotnet-11 /usr/share/dotnet/ /usr/share/dotnet/
 WORKDIR /app
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends openssl ca-certificates git \
