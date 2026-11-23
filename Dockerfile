@@ -38,8 +38,9 @@ RUN apt-get update -y \
 COPY --from=node-runtime /usr/local/ /usr/local/
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+# Keep Aspire.Cli at or above LD.Apport's Aspire.AppHost.Sdk version.
 RUN npm install --global pnpm@11.22.0 \
-    && dotnet tool install Aspire.Cli --tool-path /usr/local/bin --version 13.5.3
+    && dotnet tool install Aspire.Cli --tool-path /usr/local/bin --version 13.6.5
 # Copy necessary files from builder
 COPY --from=builder /app/target/release/spinploy spinploy
 COPY --from=frontend /app/dist ./app/dist
