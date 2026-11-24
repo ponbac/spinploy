@@ -111,9 +111,8 @@ curl -H "x-storage-token: $STORAGE_TOKEN" \
 - POST `/webhooks/azure/pr-comment` — handle PR comment slash commands (`/preview`, `/delete`)
   - `/preview`: queues a VM-local Aspire build and replies with the frontend URL
   - `/delete`: deletes preview and replies "Preview deleted"
-- POST `/webhooks/azure/pr-updated` —
-  - Active PR targeting `main` or `master`: rebuild the exact source commit only when a preview was previously requested with `/preview`
-  - Status change to `completed` or `abandoned`: delete the preview and its volumes
+- POST `/webhooks/azure/push` rebuilds an existing PR preview when a push changes its source branch or its target (`main` or `master`). Spinploy fetches both branch tips and builds their merge. A conflict fails the build before the running preview is replaced.
+- POST `/webhooks/azure/pr-updated` deletes the preview and its volumes when the PR is completed or abandoned.
 - POST `/webhooks/azure/stage-completed` —
   - Expects Azure DevOps `ms.vss-pipelines.stage-state-changed-event` service hook payloads with stage state `completed` and result `failed`
   - Alerts as soon as a stage's tracked E2E / acceptance test steps fail, even while other stages wait for production approval. Each regressing failed stage attempt gets its own Slack message naming the pipeline, stage, failed steps, commit author and build link
@@ -153,34 +152,11 @@ docker run --rm -p 8080:8080 \
 
 ### Azure DevOps usage
 
-Add a lightweight step in your pipeline to create/update a preview on each PR build:
+Configure these Azure DevOps service hooks for the preview repository. Authenticate each subscription with the Dokploy API key in the `x-api-key` header or as the HTTP Basic password.
 
-```yaml
-- task: Bash@3
-  displayName: Create/Update preview
-  env:
-    PREVIEW_API: https://your-spinploy.example.com
-    DOKPLOY_API_KEY: $(DOKPLOY_API_KEY)
-  script: |
-    curl -sS -X POST "$PREVIEW_API/previews" \
-      -H "x-api-key: $DOKPLOY_API_KEY" \
-      -H 'Content-Type: application/json' \
-      -d '{
-            "gitBranch": "$(Build.SourceBranchName)",
-            "prId": "$(System.PullRequest.PullRequestNumber)"
-          }'
-```
-
-Service hooks:
-
-- Pull request commented on: send to `/webhooks/azure/pr-comment`.
-  - Authentication: include `x-api-key` header (or Basic with password-only) with your Dokploy API key
-  - Slash commands handled in the same PR thread:
-    - `/preview`: queues the exact PR commit for a VM-local Aspire build
-    - `/delete`: deletes preview and replies "Preview deleted"
-- Pull request updated — create two subscriptions, both to `/webhooks/azure/pr-updated`:
-  - Settings: `notificationType = PushNotification` — Queue the latest exact source commit only when that PR already has a preview
-  - Settings: `notificationType = StatusUpdateNotification` — Delete previews when matching PRs are completed or abandoned
+- **Pull request commented on** sends commands to `/webhooks/azure/pr-comment`. Use `/preview` to request a build and `/delete` to remove a preview.
+- **Code pushed** (`git.push`) sends events to `/webhooks/azure/push`. Select the repository and leave the branch filter empty so pushes to feature branches and the target branch are delivered.
+- **Pull request updated** sends events to `/webhooks/azure/pr-updated` for cleanup. Set `notificationType = StatusUpdateNotification`. An existing unfiltered subscription also works. Active PR updates, including votes, are ignored.
 
 - Run stage state changed — use one subscription per pipeline, sent to `/webhooks/azure/stage-completed`:
   - Publisher: `pipelines`; event: `ms.vss-pipelines.stage-state-changed-event`; resource version: `5.1-preview.1`

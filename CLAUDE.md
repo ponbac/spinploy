@@ -170,8 +170,11 @@ Dynamic environment variables (per-preview) are prefixed directly, while project
 
 **PR Updated** (`/webhooks/azure/pr-updated`)
 
-- Push notifications: Redeploy existing preview if present
-- Status change to `completed` with target=main: Delete preview
+- A closed or abandoned PR targeting main or master deletes its preview.
+
+**Code Pushed** (`/webhooks/azure/push`)
+
+- Reconcile existing PR previews affected by a source or target branch push. The preview builds a local Git merge of both current tips.
 
 **Stage Completed** (`/webhooks/azure/stage-completed`)
 

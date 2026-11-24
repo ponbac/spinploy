@@ -41,6 +41,13 @@ impl AzureDevOpsClient {
         }
     }
 
+    pub fn repository_git_url(&self, repo_id: &str) -> Result<url::Url> {
+        Ok(url::Url::parse(&format!(
+            "{}/{}/{}/_git/{repo_id}",
+            self.base_url, self.org, self.project
+        ))?)
+    }
+
     /// Post a text reply inside an existing PR comment thread
     pub async fn reply_in_thread(
         &self,

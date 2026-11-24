@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use tokio::process::Command;
@@ -63,6 +64,7 @@ struct PreviewJob {
     pr_id: Option<String>,
     api_key: String,
     generation: u64,
+    manual: bool,
 }
 
 #[derive(Default)]
@@ -71,6 +73,7 @@ struct QueueState {
     active: HashSet<String>,
     deleting: HashSet<String>,
     generations: HashMap<String, u64>,
+    last_push: HashMap<String, u64>,
 }
 
 pub struct PreviewDeployer {
@@ -131,18 +134,19 @@ impl PreviewDeployer {
         git_branch: String,
         pr_id: Option<String>,
     ) -> Result<QueuedPreview> {
-        self.enqueue_internal(api_key, git_branch, pr_id, true)
+        self.enqueue_internal(api_key, git_branch, pr_id, None)
             .await?
             .context("manual preview request was unexpectedly ignored")
     }
 
     /// Queue a new revision only when the preview already exists or is still being built.
-    /// PR update webhooks use this path so they can never create previews automatically.
+    /// Push webhooks use this path so they can never create previews automatically.
     pub async fn enqueue_existing(
         self: &Arc<Self>,
         api_key: String,
         git_branch: String,
         pr_id: Option<String>,
+        push_id: u64,
     ) -> Result<Option<QueuedPreview>> {
         let identifier = crate::compute_identifier(&pr_id, &git_branch);
         validate_identifier(&identifier)?;
@@ -164,7 +168,7 @@ impl PreviewDeployer {
             return Ok(None);
         }
 
-        self.enqueue_internal(api_key, git_branch, pr_id, false)
+        self.enqueue_internal(api_key, git_branch, pr_id, Some(push_id))
             .await
     }
 
@@ -173,7 +177,7 @@ impl PreviewDeployer {
         api_key: String,
         git_branch: String,
         pr_id: Option<String>,
-        is_manual_request: bool,
+        push_id: Option<u64>,
     ) -> Result<Option<QueuedPreview>> {
         let identifier = crate::compute_identifier(&pr_id, &git_branch);
         validate_identifier(&identifier)?;
@@ -188,12 +192,22 @@ impl PreviewDeployer {
         let should_start_worker = {
             let mut queue = self.queue.lock().await;
             if queue.deleting.contains(&identifier) {
-                if is_manual_request {
+                if push_id.is_none() {
                     // An explicit /preview after /delete is the newest user intent.
                     queue.deleting.remove(&identifier);
                 } else {
                     return Ok(None);
                 }
+            }
+            if let Some(id) = push_id {
+                if queue
+                    .last_push
+                    .get(&identifier)
+                    .is_some_and(|last| id <= *last)
+                {
+                    return Ok(None);
+                }
+                queue.last_push.insert(identifier.clone(), id);
             }
             let generation = queue
                 .generations
@@ -209,6 +223,7 @@ impl PreviewDeployer {
                     pr_id,
                     api_key,
                     generation,
+                    manual: push_id.is_none(),
                 },
             );
             queue.active.insert(identifier.clone())
@@ -263,6 +278,7 @@ impl PreviewDeployer {
             queue.desired.remove(identifier);
             queue.active.remove(identifier);
             queue.deleting.insert(identifier.to_string());
+            queue.last_push.remove(identifier);
             queue
                 .generations
                 .entry(identifier.to_string())
@@ -355,23 +371,25 @@ impl PreviewDeployer {
     }
 
     async fn reconcile(&self, job: &PreviewJob) -> Result<bool> {
-        let revision = self.resolve_revision(job).await?;
+        let (revision, source) = self.prepare_source(job).await?;
         validate_revision(&revision)?;
-        tracing::info!(
-            identifier = job.identifier,
-            revision,
-            "Resolved preview revision"
-        );
-
-        self.reserve_preview_slot(job).await?;
-
         if !self.is_current(job).await {
             return Ok(false);
         }
+        // Includes redelivered push events and pushes already covered by a manual build.
+        if !job.manual
+            && self
+                .check_revision(&self.frontend_url(&job.identifier), &revision)
+                .await
+        {
+            tokio::fs::remove_dir_all(&source.inside).await?;
+            return Ok(true);
+        }
 
-        let source = self
-            .download_and_extract_source(&job.identifier, &revision)
-            .await?;
+        self.reserve_preview_slot(job).await?;
+        if !self.is_current(job).await {
+            return Ok(false);
+        }
         if !self.build_artifacts(job, &revision, &source).await? {
             return Ok(false);
         }
@@ -415,20 +433,65 @@ impl PreviewDeployer {
         Ok(true)
     }
 
-    async fn resolve_revision(&self, job: &PreviewJob) -> Result<String> {
-        if let Some(pr_id) = &job.pr_id {
-            let pr_id = pr_id.parse::<u64>().context("PR id must be numeric")?;
-            let pull_request = self
+    async fn prepare_source(&self, job: &PreviewJob) -> Result<(String, SourcePaths)> {
+        let repo = &self.config.azdo_repository_id;
+        let Some(pr_id) = &job.pr_id else {
+            let revision = self
                 .azure_client
-                .get_pull_request(&self.config.azdo_repository_id, pr_id)
-                .await
-                .with_context(|| format!("failed to fetch Azure PR {pr_id}"))?;
-            return Ok(pull_request.last_merge_source_commit.commit_id);
-        }
+                .get_branch_head(repo, &job.git_branch)
+                .await?;
+            validate_revision(&revision)?;
+            let paths = self
+                .download_and_extract_source(&job.identifier, &revision)
+                .await?;
+            return Ok((revision, paths));
+        };
 
-        self.azure_client
-            .get_branch_head(&self.config.azdo_repository_id, &job.git_branch)
-            .await
+        let pr = self
+            .azure_client
+            .get_pull_request(repo, pr_id.parse()?)
+            .await?;
+        ensure!(pr.status == "active", "PR {pr_id} is no longer active");
+        let relative = Path::new(&job.identifier).join("merged/source");
+        let inside = Path::new(&self.config.preview_work_dir).join(&relative);
+        let host = Path::new(&self.config.preview_host_work_dir).join(relative);
+        if tokio::fs::try_exists(&inside).await? {
+            tokio::fs::remove_dir_all(&inside).await?;
+        }
+        tokio::fs::create_dir_all(&inside).await?;
+
+        let remote = self.azure_client.repository_git_url(repo)?;
+        let cache = Path::new(&self.config.preview_work_dir)
+            .join(".git-cache")
+            .join(repo);
+        let auth = BASE64.encode(format!(":{}", self.config.azdo_pat));
+        let mut git = Command::new("bash");
+        git.args([
+            "-c",
+            include_str!("../scripts/merge-preview.sh"),
+            "merge-preview",
+        ])
+        .arg(cache)
+        .arg(remote.as_str())
+        .arg(&pr.target_ref_name)
+        .arg(&pr.source_ref_name)
+        .arg(&inside)
+        .env("GIT_CONFIG_COUNT", "1")
+        .env(
+            "GIT_CONFIG_KEY_0",
+            "http.https://dev.azure.com/.extraHeader",
+        )
+        .env("GIT_CONFIG_VALUE_0", format!("Authorization: Basic {auth}"))
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .kill_on_drop(true);
+        let output = git.output().await.context("failed to run preview merge")?;
+        ensure!(
+            output.status.success(),
+            "PR {pr_id} preview merge failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let revision = String::from_utf8(output.stdout)?.trim().to_string();
+        Ok((revision, SourcePaths { inside, host }))
     }
 
     async fn download_and_extract_source(
