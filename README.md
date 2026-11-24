@@ -109,7 +109,7 @@ curl -H "x-storage-token: $STORAGE_TOKEN" \
   - Request (JSON): `{ "gitBranch": "feature/foo", "prId": "123" }`
   - Response: 204 No Content
 - POST `/webhooks/azure/pr-comment` — handle PR comment slash commands (`/preview`, `/delete`)
-  - `/preview`: queues a VM-local Aspire build and replies with the frontend URL
+  - `/preview`: queues a VM-local Aspire build of the PR merged into its target branch and replies with the frontend URL. PRs from forks are not supported
   - `/delete`: deletes preview and replies "Preview deleted"
 - POST `/webhooks/azure/push` rebuilds an existing PR preview when a push changes its source branch or its target (`main` or `master`). Spinploy fetches both branch tips and builds their merge. A conflict fails the build before the running preview is replaced.
 - POST `/webhooks/azure/pr-updated` deletes the preview and its volumes when the PR is completed or abandoned.
@@ -152,11 +152,29 @@ docker run --rm -p 8080:8080 \
 
 ### Azure DevOps usage
 
+A pipeline step can also request a preview build explicitly. Like `/preview`, every call queues a rebuild, so run it only when you want one rather than on every PR build:
+
+```yaml
+- bash: |
+    jq -n --arg branch "${SOURCE_BRANCH#refs/heads/}" --arg pr "$PR_ID" \
+      '{gitBranch: $branch, prId: $pr}' |
+      curl -sS --fail-with-body -X POST "$PREVIEW_API/api/previews" \
+        -H "x-api-key: $DOKPLOY_API_KEY" \
+        -H 'Content-Type: application/json' \
+        --data @-
+  displayName: Request preview
+  env:
+    PREVIEW_API: https://your-spinploy.example.com
+    DOKPLOY_API_KEY: $(DOKPLOY_API_KEY)
+    PR_ID: $(System.PullRequest.PullRequestId)
+    SOURCE_BRANCH: $(System.PullRequest.SourceBranch)
+```
+
 Configure these Azure DevOps service hooks for the preview repository. Authenticate each subscription with the Dokploy API key in the `x-api-key` header or as the HTTP Basic password.
 
 - **Pull request commented on** sends commands to `/webhooks/azure/pr-comment`. Use `/preview` to request a build and `/delete` to remove a preview.
 - **Code pushed** (`git.push`) sends events to `/webhooks/azure/push`. Select the repository and leave the branch filter empty so pushes to feature branches and the target branch are delivered.
-- **Pull request updated** sends events to `/webhooks/azure/pr-updated` for cleanup. Set `notificationType = StatusUpdateNotification`. An existing unfiltered subscription also works. Active PR updates, including votes, are ignored.
+- **Pull request updated** sends events to `/webhooks/azure/pr-updated` for cleanup. Set `notificationType = StatusUpdateNotification`. An existing unfiltered subscription also works. Active PR updates, including votes, are ignored, so a `notificationType = PushNotification` subscription is no longer needed.
 
 - Run stage state changed — use one subscription per pipeline, sent to `/webhooks/azure/stage-completed`:
   - Publisher: `pipelines`; event: `ms.vss-pipelines.stage-state-changed-event`; resource version: `5.1-preview.1`

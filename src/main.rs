@@ -820,8 +820,7 @@ async fn azure_pr_updated_webhook(
         target_branch = spinploy::strip_refs_heads(&pull_request.target_ref_name);
     }
 
-    if !target_branch.eq_ignore_ascii_case("main") && !target_branch.eq_ignore_ascii_case("master")
-    {
+    if !is_preview_target(&target_branch) {
         tracing::info!(
             pr = pr_id.as_deref().unwrap_or("?"),
             source_branch = branch,
@@ -847,6 +846,11 @@ async fn azure_pr_updated_webhook(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// PR previews follow PRs into `main` or `master` (branch name, without `refs/heads/`).
+fn is_preview_target(branch: &str) -> bool {
+    branch.eq_ignore_ascii_case("main") || branch.eq_ignore_ascii_case("master")
+}
+
 async fn azure_push_webhook(
     State(state): State<AppState>,
     ApiKey(api_key): ApiKey,
@@ -865,8 +869,8 @@ async fn azure_push_webhook(
         .ref_updates
         .iter()
         .filter(|r| {
+            // A zero new object id is a branch deletion.
             r.name.starts_with("refs/heads/")
-                && r.old_object_id != r.new_object_id
                 && r.new_object_id != "0000000000000000000000000000000000000000"
         })
         .map(|r| r.name.as_str())
@@ -875,42 +879,37 @@ async fn azure_push_webhook(
         return Ok(StatusCode::NO_CONTENT);
     }
 
-    let upstream_error = |error: anyhow::Error| (StatusCode::BAD_GATEWAY, error.to_string());
-    let composes = state
-        .dokploy_client
-        .list_composes_with_prefix(&api_key, &state.config.environment_id, "preview-pr-")
+    let prs = state
+        .preview_deployer
+        .existing_pr_ids(&api_key)
         .await
-        .map_err(upstream_error)?;
-    let mut prs: BTreeSet<u64> = composes
-        .iter()
-        .filter_map(|c| c.name.strip_prefix("pr-")?.parse().ok())
-        .collect();
-    for snapshot in state.preview_deployer.snapshots().await {
-        if snapshot.status == spinploy::PreviewReconcileStatus::Building
-            && let Some(id) = snapshot.pr_id.and_then(|id| id.parse::<u64>().ok())
-        {
-            prs.insert(id);
-        }
-    }
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
 
+    // Each preview is independent: a failure for one PR must not starve the others. Any failure
+    // still returns 502 so Azure redelivers; previews already queued drop the repeated push id.
     let mut queued = false;
+    let mut failed = false;
     for id in prs {
-        let pr = state
+        let pr = match state
             .azure_client
             .get_pull_request(&state.config.azdo_repository_id, id)
             .await
-            .map_err(upstream_error)?;
+        {
+            Ok(pr) => pr,
+            Err(error) => {
+                tracing::error!(pr = id, error = %error, "Failed to fetch Azure PR for push");
+                failed = true;
+                continue;
+            }
+        };
         if pr.status != "active"
-            || !matches!(
-                pr.target_ref_name.as_str(),
-                "refs/heads/main" | "refs/heads/master"
-            )
+            || !is_preview_target(&spinploy::strip_refs_heads(&pr.target_ref_name))
             || !(branches.contains(pr.source_ref_name.as_str())
                 || branches.contains(pr.target_ref_name.as_str()))
         {
             continue;
         }
-        queued |= state
+        match state
             .preview_deployer
             .enqueue_existing(
                 api_key.clone(),
@@ -919,8 +918,28 @@ async fn azure_push_webhook(
                 resource.push_id,
             )
             .await
-            .map_err(upstream_error)?
-            .is_some();
+        {
+            Ok(Some(preview)) => {
+                tracing::info!(
+                    identifier = preview.identifier,
+                    push_id = resource.push_id,
+                    refs = ?branches,
+                    "Queued preview rebuild for Azure push"
+                );
+                queued = true;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(pr = id, error = %error, "Failed to queue preview rebuild for push");
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "failed to reconcile some previews for this push".to_string(),
+        ));
     }
     Ok(if queued {
         StatusCode::ACCEPTED
@@ -1485,7 +1504,7 @@ mod tests {
         .expect("PR comment webhook response")
     }
 
-    async fn send_pr_updated_webhook(state: AppState) -> axum::response::Response {
+    async fn send_pr_updated_webhook(state: AppState, status: &str) -> axum::response::Response {
         state
             .auth_cache
             .insert("dokploy-secret".to_string(), AuthDecision::Valid)
@@ -1499,7 +1518,7 @@ mod tests {
                 "pullRequestId": 42,
                 "sourceRefName": "refs/heads/fix/delete",
                 "targetRefName": "refs/heads/main",
-                "status": "active"
+                "status": status
             }
         });
 
@@ -2182,9 +2201,10 @@ mod tests {
                 StatusCode::NO_CONTENT,
             ),
             ("refs/tags/main", new.as_str(), true, StatusCode::NO_CONTENT),
+            // Azure Repos refs are case-sensitive, so this is a different branch.
             (
-                "refs/heads/main",
-                old.as_str(),
+                "refs/heads/Main",
+                new.as_str(),
                 true,
                 StatusCode::NO_CONTENT,
             ),
@@ -2243,14 +2263,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pr_update_does_not_create_a_preview() {
-        let (dokploy_url, fixture) =
-            spawn_dokploy_fixture(DokployDeleteBehavior::AlreadyAbsent).await;
+    async fn active_pr_update_never_rebuilds_or_creates_a_preview() {
+        let (dokploy_url, fixture) = spawn_dokploy_fixture(DokployDeleteBehavior::Succeeds).await;
         let (azure_base_url, _replies) = spawn_azure_reply_recorder().await;
         let state = test_state(test_config(dokploy_url), &azure_base_url);
         let deployer = Arc::clone(&state.preview_deployer);
 
-        let response = send_pr_updated_webhook(state).await;
+        let response = send_pr_updated_webhook(state, "active").await;
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 0);
@@ -2258,14 +2277,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_pr_metadata_update_ignores_an_existing_preview() {
-        let (dokploy_url, fixture) = spawn_dokploy_fixture(DokployDeleteBehavior::Succeeds).await;
-        let (azure_base_url, _replies) = spawn_azure_reply_recorder().await;
-        let state = test_state(test_config(dokploy_url), &azure_base_url);
+    async fn closed_pr_update_deletes_its_preview() {
+        for status in ["completed", "abandoned"] {
+            let (dokploy_url, fixture) =
+                spawn_dokploy_fixture(DokployDeleteBehavior::Succeeds).await;
+            let (azure_base_url, _replies) = spawn_azure_reply_recorder().await;
+            let state = test_state(test_config(dokploy_url), &azure_base_url);
 
-        let response = send_pr_updated_webhook(state).await;
+            let response = send_pr_updated_webhook(state, status).await;
 
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 0);
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while fixture.delete_requests.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{status} PR should delete its preview"));
+        }
     }
 }

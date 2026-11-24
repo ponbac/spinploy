@@ -67,7 +67,6 @@ pub struct AzurePushResource {
 #[serde(rename_all = "camelCase")]
 pub struct AzureRefUpdate {
     pub name: String,
-    pub old_object_id: String,
     pub new_object_id: String,
 }
 
@@ -214,6 +213,16 @@ pub struct AzurePullRequestDetail {
     pub source_ref_name: String,
     #[serde(rename = "targetRefName")]
     pub target_ref_name: String,
+    /// Present only when the source branch lives in a fork of the target repository.
+    #[serde(rename = "forkSource", default)]
+    pub fork_source: Option<serde_json::Value>,
+}
+
+// Azure DevOps REST: repository detail
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureRepositoryDetail {
+    pub remote_url: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -11,6 +11,8 @@ trap 'rm -rf "$tmp"' EXIT
 git init -q -b main "$tmp/repo"
 repo=(git -C "$tmp/repo" -c user.name=Test -c user.email=test@localhost)
 echo base > "$tmp/repo/common"
+echo build-input > "$tmp/repo/ignored"
+echo 'ignored export-ignore' > "$tmp/repo/.gitattributes"
 "${repo[@]}" add .
 "${repo[@]}" commit -qm base
 "${repo[@]}" switch -qc feature
@@ -26,6 +28,7 @@ merge=(bash scripts/merge-preview.sh "$tmp/cache" "$tmp/repo" refs/heads/main re
 first=$("${merge[@]}")
 test -f "$tmp/tree/feature"
 test -f "$tmp/tree/main"
+test -f "$tmp/tree/ignored"
 test "$first" = "$("${merge[@]}")"
 echo main-new > "$tmp/repo/common"
 "${repo[@]}" commit -qam advance

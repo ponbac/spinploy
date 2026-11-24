@@ -9,6 +9,9 @@ destination=$5
 
 # The deployer's single build permit serializes access to this object cache.
 git init --bare --quiet "$cache"
+# info/attributes outranks in-tree .gitattributes: export the full tree, as a checkout would.
+mkdir -p "$cache/info"
+printf '* -export-ignore -export-subst\n' >"$cache/info/attributes"
 repo=(git --git-dir="$cache")
 "${repo[@]}" fetch --quiet --atomic --no-tags "$remote" \
     "+$target_ref:refs/preview/target" "+$source_ref:refs/preview/source"
