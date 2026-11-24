@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Cursor, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use tokio::process::Command;
@@ -65,12 +66,29 @@ struct PreviewJob {
     generation: u64,
 }
 
+/// What asked for a preview build.
+enum Trigger {
+    /// `/preview` or the API: always build, even when the preview already serves the revision.
+    Manual,
+    /// A Code pushed webhook. `generation` is the preview's generation when its existence was
+    /// checked; any enqueue or deletion since then drops the push. A newer build fetches the
+    /// branch tips after this push landed, so it already includes it.
+    Push {
+        push_id: u64,
+        generation: Option<u64>,
+    },
+}
+
 #[derive(Default)]
 struct QueueState {
     desired: HashMap<String, PreviewJob>,
     active: HashSet<String>,
     deleting: HashSet<String>,
     generations: HashMap<String, u64>,
+    /// Highest Azure push id accepted per preview; push ids only grow within a repository.
+    last_push: HashMap<String, u64>,
+    /// Previews with a manual build request that no build has fulfilled yet.
+    forced: HashSet<String>,
 }
 
 pub struct PreviewDeployer {
@@ -131,28 +149,32 @@ impl PreviewDeployer {
         git_branch: String,
         pr_id: Option<String>,
     ) -> Result<QueuedPreview> {
-        self.enqueue_internal(api_key, git_branch, pr_id, true)
+        self.enqueue_internal(api_key, git_branch, pr_id, Trigger::Manual)
             .await?
             .context("manual preview request was unexpectedly ignored")
     }
 
     /// Queue a new revision only when the preview already exists or is still being built.
-    /// PR update webhooks use this path so they can never create previews automatically.
+    /// Push webhooks use this path so they can never create previews automatically.
     pub async fn enqueue_existing(
         self: &Arc<Self>,
         api_key: String,
         git_branch: String,
         pr_id: Option<String>,
+        push_id: u64,
     ) -> Result<Option<QueuedPreview>> {
         let identifier = crate::compute_identifier(&pr_id, &git_branch);
         validate_identifier(&identifier)?;
 
-        let is_active = {
+        let (is_active, generation) = {
             let queue = self.queue.lock().await;
             if queue.deleting.contains(&identifier) {
                 return Ok(None);
             }
-            queue.active.contains(&identifier)
+            (
+                queue.active.contains(&identifier),
+                queue.generations.get(&identifier).copied(),
+            )
         };
         if !is_active
             && self
@@ -164,8 +186,16 @@ impl PreviewDeployer {
             return Ok(None);
         }
 
-        self.enqueue_internal(api_key, git_branch, pr_id, false)
-            .await
+        self.enqueue_internal(
+            api_key,
+            git_branch,
+            pr_id,
+            Trigger::Push {
+                push_id,
+                generation,
+            },
+        )
+        .await
     }
 
     async fn enqueue_internal(
@@ -173,7 +203,7 @@ impl PreviewDeployer {
         api_key: String,
         git_branch: String,
         pr_id: Option<String>,
-        is_manual_request: bool,
+        trigger: Trigger,
     ) -> Result<Option<QueuedPreview>> {
         let identifier = crate::compute_identifier(&pr_id, &git_branch);
         validate_identifier(&identifier)?;
@@ -187,12 +217,26 @@ impl PreviewDeployer {
 
         let should_start_worker = {
             let mut queue = self.queue.lock().await;
-            if queue.deleting.contains(&identifier) {
-                if is_manual_request {
+            match trigger {
+                Trigger::Manual => {
                     // An explicit /preview after /delete is the newest user intent.
                     queue.deleting.remove(&identifier);
-                } else {
-                    return Ok(None);
+                    queue.forced.insert(identifier.clone());
+                }
+                Trigger::Push {
+                    push_id,
+                    generation,
+                } => {
+                    // Deletion bumps the generation, so this also drops pushes racing a delete.
+                    let superseded = queue.generations.get(&identifier).copied() != generation
+                        || queue
+                            .last_push
+                            .get(&identifier)
+                            .is_some_and(|last| push_id <= *last);
+                    if superseded {
+                        return Ok(None);
+                    }
+                    queue.last_push.insert(identifier.clone(), push_id);
                 }
             }
             let generation = queue
@@ -234,6 +278,32 @@ impl PreviewDeployer {
         }))
     }
 
+    /// PR numbers of previews that exist in Dokploy or have a build queued or running.
+    pub async fn existing_pr_ids(&self, api_key: &str) -> Result<BTreeSet<u64>> {
+        fn pr_number(identifier: &str) -> Option<u64> {
+            identifier.strip_prefix("pr-")?.parse().ok()
+        }
+
+        let mut ids: BTreeSet<u64> = self
+            .queue
+            .lock()
+            .await
+            .active
+            .iter()
+            .filter_map(|identifier| pr_number(identifier))
+            .collect();
+        let composes = self
+            .dokploy_client
+            .list_composes_with_prefix(api_key, &self.config.environment_id, "preview-pr-")
+            .await?;
+        ids.extend(
+            composes
+                .iter()
+                .filter_map(|compose| pr_number(&compose.name)),
+        );
+        Ok(ids)
+    }
+
     pub async fn status(&self, identifier: &str) -> Option<PreviewReconcileStatus> {
         self.statuses
             .read()
@@ -258,17 +328,7 @@ impl PreviewDeployer {
     /// and delete the Dokploy compose including volumes.
     pub async fn delete(&self, api_key: &str, identifier: &str) -> Result<bool> {
         validate_identifier(identifier)?;
-        {
-            let mut queue = self.queue.lock().await;
-            queue.desired.remove(identifier);
-            queue.active.remove(identifier);
-            queue.deleting.insert(identifier.to_string());
-            queue
-                .generations
-                .entry(identifier.to_string())
-                .and_modify(|value| *value += 1)
-                .or_insert(1);
-        }
+        self.mark_preview_deleting(identifier).await;
 
         let _permit = self
             .operation_lock
@@ -355,23 +415,33 @@ impl PreviewDeployer {
     }
 
     async fn reconcile(&self, job: &PreviewJob) -> Result<bool> {
-        let revision = self.resolve_revision(job).await?;
+        let (revision, source) = self.prepare_source(job).await?;
         validate_revision(&revision)?;
         tracing::info!(
             identifier = job.identifier,
             revision,
             "Resolved preview revision"
         );
-
-        self.reserve_preview_slot(job).await?;
-
         if !self.is_current(job).await {
             return Ok(false);
         }
+        // A push whose merge result is already live (a redelivery, or a push an earlier build
+        // already included) must not replace the preview and its volumes.
+        let forced = self.queue.lock().await.forced.contains(&job.identifier);
+        if !forced && self.serves_revision(&job.identifier, &revision).await {
+            tracing::info!(
+                identifier = job.identifier,
+                revision,
+                "Preview already serves this revision; skipping rebuild"
+            );
+            self.remove_source_workspace(job, &revision, &source).await;
+            return Ok(true);
+        }
 
-        let source = self
-            .download_and_extract_source(&job.identifier, &revision)
-            .await?;
+        self.reserve_preview_slot(job).await?;
+        if !self.is_current(job).await {
+            return Ok(false);
+        }
         if !self.build_artifacts(job, &revision, &source).await? {
             return Ok(false);
         }
@@ -402,8 +472,25 @@ impl PreviewDeployer {
         if !self.wait_until_ready(job, &revision).await? {
             return Ok(false);
         }
+        {
+            // A newer /preview may have arrived during the readiness probes; leave its flag.
+            let mut queue = self.queue.lock().await;
+            if queue.generations.get(&job.identifier) == Some(&job.generation) {
+                queue.forced.remove(&job.identifier);
+            }
+        }
         self.cleanup_preview_images(&job.identifier, Some(&revision))
             .await;
+        self.remove_source_workspace(job, &revision, &source).await;
+        Ok(true)
+    }
+
+    async fn remove_source_workspace(
+        &self,
+        job: &PreviewJob,
+        revision: &str,
+        source: &SourcePaths,
+    ) {
         if let Err(error) = tokio::fs::remove_dir_all(&source.inside).await {
             tracing::warn!(
                 identifier = job.identifier,
@@ -412,23 +499,77 @@ impl PreviewDeployer {
                 "Failed to clean successful preview source workspace"
             );
         }
-        Ok(true)
     }
 
-    async fn resolve_revision(&self, job: &PreviewJob) -> Result<String> {
-        if let Some(pr_id) = &job.pr_id {
-            let pr_id = pr_id.parse::<u64>().context("PR id must be numeric")?;
-            let pull_request = self
+    async fn prepare_source(&self, job: &PreviewJob) -> Result<(String, SourcePaths)> {
+        let repo = &self.config.azdo_repository_id;
+        let Some(pr_id) = &job.pr_id else {
+            let revision = self
                 .azure_client
-                .get_pull_request(&self.config.azdo_repository_id, pr_id)
-                .await
-                .with_context(|| format!("failed to fetch Azure PR {pr_id}"))?;
-            return Ok(pull_request.last_merge_source_commit.commit_id);
-        }
+                .get_branch_head(repo, &job.git_branch)
+                .await?;
+            validate_revision(&revision)?;
+            let paths = self
+                .download_and_extract_source(&job.identifier, &revision)
+                .await?;
+            return Ok((revision, paths));
+        };
 
-        self.azure_client
-            .get_branch_head(&self.config.azdo_repository_id, &job.git_branch)
+        let pr = self
+            .azure_client
+            .get_pull_request(repo, pr_id.parse().context("PR id must be numeric")?)
             .await
+            .with_context(|| format!("failed to fetch Azure PR {pr_id}"))?;
+        ensure!(pr.status == "active", "PR {pr_id} is no longer active");
+        ensure!(
+            pr.fork_source.is_none(),
+            "PR {pr_id} comes from a fork; previews only build branches of the target repository"
+        );
+        let relative = Path::new(&job.identifier).join("merged/source");
+        let inside = Path::new(&self.config.preview_work_dir).join(&relative);
+        let host = Path::new(&self.config.preview_host_work_dir).join(relative);
+        if tokio::fs::try_exists(&inside).await? {
+            tokio::fs::remove_dir_all(&inside).await?;
+        }
+        tokio::fs::create_dir_all(&inside).await?;
+
+        let remote = self
+            .azure_client
+            .get_repository_remote_url(repo)
+            .await
+            .context("failed to resolve the Azure repository clone URL")?;
+        let cache = Path::new(&self.config.preview_work_dir)
+            .join(".git-cache")
+            .join(repo);
+        let auth = BASE64.encode(format!(":{}", self.config.azdo_pat));
+        let mut git = Command::new("bash");
+        git.args([
+            "-c",
+            include_str!("../scripts/merge-preview.sh"),
+            "merge-preview",
+        ])
+        .arg(cache)
+        .arg(&remote)
+        .arg(&pr.target_ref_name)
+        .arg(&pr.source_ref_name)
+        .arg(&inside)
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", format!("http.{remote}.extraHeader"))
+        .env("GIT_CONFIG_VALUE_0", format!("Authorization: Basic {auth}"))
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Abort a stalled transfer instead of holding the single build permit forever.
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "60")
+        .kill_on_drop(true);
+        let output = git.output().await.context("failed to run preview merge")?;
+        ensure!(
+            output.status.success(),
+            "PR {pr_id} preview merge failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let revision = String::from_utf8(output.stdout)?.trim().to_string();
+        self.ensure_apphost(&inside).await?;
+        Ok((revision, SourcePaths { inside, host }))
     }
 
     async fn download_and_extract_source(
@@ -463,15 +604,19 @@ impl PreviewDeployer {
         tokio::task::spawn_blocking(move || extract_zip_archive(&archive, &extraction_path))
             .await
             .context("source extraction task failed")??;
-
-        let apphost = inside.join(&self.config.preview_apphost_path);
-        ensure!(
-            tokio::fs::try_exists(&apphost).await?,
-            "archive does not contain expected AppHost {}",
-            self.config.preview_apphost_path
-        );
+        self.ensure_apphost(&inside).await?;
 
         Ok(SourcePaths { inside, host })
+    }
+
+    async fn ensure_apphost(&self, source: &Path) -> Result<()> {
+        let apphost = source.join(&self.config.preview_apphost_path);
+        ensure!(
+            tokio::fs::try_exists(&apphost).await?,
+            "source does not contain expected AppHost {}",
+            self.config.preview_apphost_path
+        );
+        Ok(())
     }
 
     async fn build_artifacts(
@@ -817,8 +962,9 @@ aspire do prepare-preview \
         )
     }
 
-    /// Remove enough old previews to reserve one of the three slots before any
-    /// source download or artifact build starts for a new preview.
+    /// Remove enough old previews to reserve one of the three slots before an artifact
+    /// build starts for a new preview. The source is prepared first, so a merge conflict
+    /// fails without evicting another preview.
     async fn reserve_preview_slot(&self, job: &PreviewJob) -> Result<()> {
         if self
             .dokploy_client
@@ -893,6 +1039,8 @@ aspire do prepare-preview \
         queue.desired.remove(identifier);
         queue.active.remove(identifier);
         queue.deleting.insert(identifier.to_string());
+        queue.last_push.remove(identifier);
+        queue.forced.remove(identifier);
         queue
             .generations
             .entry(identifier.to_string())
@@ -1071,6 +1219,11 @@ aspire do prepare-preview \
             .await
             .map(|response| response.status().is_success())
             .unwrap_or(false)
+    }
+
+    async fn serves_revision(&self, identifier: &str, revision: &str) -> bool {
+        let url = self.frontend_url(identifier);
+        self.check_health(&url).await && self.check_revision(&url, revision).await
     }
 
     async fn check_revision(&self, frontend_url: &str, expected_revision: &str) -> bool {

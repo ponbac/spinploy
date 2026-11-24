@@ -454,6 +454,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(healthz))
         .route("/webhooks/azure/pr-comment", post(azure_pr_comment_webhook))
         .route("/webhooks/azure/pr-updated", post(azure_pr_updated_webhook))
+        .route("/webhooks/azure/push", post(azure_push_webhook))
         .merge(e2e_alert_routes())
         .nest("/api", api_routes)
         .fallback_service(serve_frontend)
@@ -785,6 +786,18 @@ async fn azure_pr_updated_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
+    let is_closed = payload
+        .resource
+        .status
+        .as_deref()
+        .map(|status| {
+            status.eq_ignore_ascii_case("completed") || status.eq_ignore_ascii_case("abandoned")
+        })
+        .unwrap_or(false);
+    if !is_closed {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
     let branch = spinploy::strip_refs_heads(&payload.resource.source_ref_name);
     let pr_id = Some(payload.resource.pull_request_id.to_string());
     let mut target_branch =
@@ -807,8 +820,7 @@ async fn azure_pr_updated_webhook(
         target_branch = spinploy::strip_refs_heads(&pull_request.target_ref_name);
     }
 
-    if !target_branch.eq_ignore_ascii_case("main") && !target_branch.eq_ignore_ascii_case("master")
-    {
+    if !is_preview_target(&target_branch) {
         tracing::info!(
             pr = pr_id.as_deref().unwrap_or("?"),
             source_branch = branch,
@@ -818,52 +830,122 @@ async fn azure_pr_updated_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
-    let is_closed = payload
-        .resource
-        .status
-        .as_deref()
-        .map(|status| {
-            status.eq_ignore_ascii_case("completed") || status.eq_ignore_ascii_case("abandoned")
+    tracing::info!(
+        pr = pr_id.as_deref().unwrap_or("?"),
+        source_branch = branch,
+        target_branch,
+        "Received closed Azure PR; queuing preview deletion"
+    );
+
+    let identifier = spinploy::compute_identifier(&pr_id, &branch);
+    tokio::spawn(async move {
+        if let Err(error) = preview_deployer.delete(&api_key, &identifier).await {
+            tracing::error!(identifier, error = %error, "Preview deletion failed");
+        }
+    });
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// PR previews follow PRs into `main` or `master` (branch name, without `refs/heads/`).
+fn is_preview_target(branch: &str) -> bool {
+    branch.eq_ignore_ascii_case("main") || branch.eq_ignore_ascii_case("master")
+}
+
+async fn azure_push_webhook(
+    State(state): State<AppState>,
+    ApiKey(api_key): ApiKey,
+    Json(payload): Json<AzurePushEvent>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let resource = payload.resource;
+    if payload.event_type != "git.push"
+        || !resource
+            .repository
+            .id
+            .eq_ignore_ascii_case(&state.config.azdo_repository_id)
+    {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let branches: BTreeSet<_> = resource
+        .ref_updates
+        .iter()
+        .filter(|r| {
+            // A zero new object id is a branch deletion.
+            r.name.starts_with("refs/heads/")
+                && r.new_object_id != "0000000000000000000000000000000000000000"
         })
-        .unwrap_or(false);
-    if is_closed {
-        tracing::info!(
-            pr = pr_id.as_deref().unwrap_or("?"),
-            source_branch = branch,
-            target_branch,
-            "Received closed Azure PR; queuing preview deletion"
-        );
-
-        let identifier = spinploy::compute_identifier(&pr_id, &branch);
-        tokio::spawn(async move {
-            if let Err(error) = preview_deployer.delete(&api_key, &identifier).await {
-                tracing::error!(identifier, error = %error, "Preview deletion failed");
-            }
-        });
-        return Ok(StatusCode::NO_CONTENT.into_response());
+        .map(|r| r.name.as_str())
+        .collect();
+    if branches.is_empty() {
+        return Ok(StatusCode::NO_CONTENT);
     }
 
-    let queued = preview_deployer
-        .enqueue_existing(api_key, branch.clone(), pr_id.clone())
+    let prs = state
+        .preview_deployer
+        .existing_pr_ids(&api_key)
         .await
-        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
-    if queued.is_some() {
-        tracing::info!(
-            pr = pr_id.as_deref().unwrap_or("?"),
-            branch,
-            target_branch,
-            "Received Azure PR update; queued existing preview reconcile"
-        );
-        Ok(StatusCode::ACCEPTED.into_response())
-    } else {
-        tracing::info!(
-            pr = pr_id.as_deref().unwrap_or("?"),
-            branch,
-            target_branch,
-            "Received Azure PR update without an existing preview; skipping"
-        );
-        Ok(StatusCode::NO_CONTENT.into_response())
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+
+    // Each preview is independent: a failure for one PR must not starve the others. Any failure
+    // still returns 502 so Azure redelivers; previews already queued drop the repeated push id.
+    let mut queued = false;
+    let mut failed = false;
+    for id in prs {
+        let pr = match state
+            .azure_client
+            .get_pull_request(&state.config.azdo_repository_id, id)
+            .await
+        {
+            Ok(pr) => pr,
+            Err(error) => {
+                tracing::error!(pr = id, error = %error, "Failed to fetch Azure PR for push");
+                failed = true;
+                continue;
+            }
+        };
+        if pr.status != "active"
+            || !is_preview_target(&spinploy::strip_refs_heads(&pr.target_ref_name))
+            || !(branches.contains(pr.source_ref_name.as_str())
+                || branches.contains(pr.target_ref_name.as_str()))
+        {
+            continue;
+        }
+        match state
+            .preview_deployer
+            .enqueue_existing(
+                api_key.clone(),
+                spinploy::strip_refs_heads(&pr.source_ref_name),
+                Some(id.to_string()),
+                resource.push_id,
+            )
+            .await
+        {
+            Ok(Some(preview)) => {
+                tracing::info!(
+                    identifier = preview.identifier,
+                    push_id = resource.push_id,
+                    refs = ?branches,
+                    "Queued preview rebuild for Azure push"
+                );
+                queued = true;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(pr = id, error = %error, "Failed to queue preview rebuild for push");
+                failed = true;
+            }
+        }
     }
+    if failed {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "failed to reconcile some previews for this push".to_string(),
+        ));
+    }
+    Ok(if queued {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::NO_CONTENT
+    })
 }
 
 fn e2e_alert_routes() -> Router<AppState> {
@@ -1422,7 +1504,7 @@ mod tests {
         .expect("PR comment webhook response")
     }
 
-    async fn send_pr_updated_webhook(state: AppState) -> axum::response::Response {
+    async fn send_pr_updated_webhook(state: AppState, status: &str) -> axum::response::Response {
         state
             .auth_cache
             .insert("dokploy-secret".to_string(), AuthDecision::Valid)
@@ -1436,7 +1518,7 @@ mod tests {
                 "pullRequestId": 42,
                 "sourceRefName": "refs/heads/fix/delete",
                 "targetRefName": "refs/heads/main",
-                "status": "active"
+                "status": status
             }
         });
 
@@ -2100,29 +2182,118 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pr_update_does_not_create_a_preview() {
-        let (dokploy_url, fixture) =
-            spawn_dokploy_fixture(DokployDeleteBehavior::AlreadyAbsent).await;
+    async fn pushes_rebuild_only_an_existing_preview_whose_source_or_target_changed() {
+        let deleted = "0000000000000000000000000000000000000000";
+        let old = "a".repeat(40);
+        let new = "b".repeat(40);
+        for (branch, head, present, expected) in [
+            (
+                "refs/heads/fix/delete",
+                new.as_str(),
+                true,
+                StatusCode::ACCEPTED,
+            ),
+            ("refs/heads/main", new.as_str(), true, StatusCode::ACCEPTED),
+            (
+                "refs/heads/unrelated",
+                new.as_str(),
+                true,
+                StatusCode::NO_CONTENT,
+            ),
+            ("refs/tags/main", new.as_str(), true, StatusCode::NO_CONTENT),
+            // Azure Repos refs are case-sensitive, so this is a different branch.
+            (
+                "refs/heads/Main",
+                new.as_str(),
+                true,
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                "refs/heads/fix/delete",
+                deleted,
+                true,
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                "refs/heads/main",
+                new.as_str(),
+                false,
+                StatusCode::NO_CONTENT,
+            ),
+        ] {
+            let behavior = if present {
+                DokployDeleteBehavior::Succeeds
+            } else {
+                DokployDeleteBehavior::AlreadyAbsent
+            };
+            let (dokploy_url, _) = spawn_dokploy_fixture(behavior).await;
+            let azure = Router::new().route("/{*path}", get(|| async {
+                Json(serde_json::json!({
+                    "title": "PR", "status": "active",
+                    "sourceRefName": "refs/heads/fix/delete", "targetRefName": "refs/heads/main",
+                }))
+            }));
+            let azure_url = spawn_test_server(azure).await;
+            let state = test_state(test_config(dokploy_url), &azure_url);
+            let payload = || {
+                serde_json::from_value(serde_json::json!({
+                    "eventType": "git.push", "resource": {
+                        "pushId": 123, "repository": { "id": "repository-id" },
+                        "refUpdates": [{ "name": branch, "oldObjectId": old, "newObjectId": head }]
+                    }
+                }))
+                .unwrap()
+            };
+            let status =
+                azure_push_webhook(State(state.clone()), ApiKey("test".into()), Json(payload()))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                status, expected,
+                "push to {branch}, head {head}, preview present {present}"
+            );
+            if status == StatusCode::ACCEPTED {
+                let duplicate =
+                    azure_push_webhook(State(state), ApiKey("test".into()), Json(payload()))
+                        .await
+                        .unwrap();
+                assert_eq!(duplicate, StatusCode::NO_CONTENT);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn active_pr_update_never_rebuilds_or_creates_a_preview() {
+        let (dokploy_url, fixture) = spawn_dokploy_fixture(DokployDeleteBehavior::Succeeds).await;
         let (azure_base_url, _replies) = spawn_azure_reply_recorder().await;
         let state = test_state(test_config(dokploy_url), &azure_base_url);
         let deployer = Arc::clone(&state.preview_deployer);
 
-        let response = send_pr_updated_webhook(state).await;
+        let response = send_pr_updated_webhook(state, "active").await;
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 0);
         assert!(deployer.status("pr-42").await.is_none());
     }
 
     #[tokio::test]
-    async fn pr_update_reconciles_an_existing_preview() {
-        let (dokploy_url, fixture) = spawn_dokploy_fixture(DokployDeleteBehavior::Succeeds).await;
-        let (azure_base_url, _replies) = spawn_azure_reply_recorder().await;
-        let state = test_state(test_config(dokploy_url), &azure_base_url);
+    async fn closed_pr_update_deletes_its_preview() {
+        for status in ["completed", "abandoned"] {
+            let (dokploy_url, fixture) =
+                spawn_dokploy_fixture(DokployDeleteBehavior::Succeeds).await;
+            let (azure_base_url, _replies) = spawn_azure_reply_recorder().await;
+            let state = test_state(test_config(dokploy_url), &azure_base_url);
 
-        let response = send_pr_updated_webhook(state).await;
+            let response = send_pr_updated_webhook(state, status).await;
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        assert_eq!(fixture.project_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while fixture.delete_requests.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{status} PR should delete its preview"));
+        }
     }
 }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::models::azure::{
     AzureBuildDetail, AzureBuildListItem, AzureBuildListResponse, AzureBuildTimeline, AzureCommit,
-    AzureGitRefList, AzurePullRequestDetail,
+    AzureGitRefList, AzurePullRequestDetail, AzureRepositoryDetail,
 };
 use anyhow::{Context, Result, bail};
 
@@ -187,6 +187,26 @@ impl AzureDevOpsClient {
             .await?;
 
         Ok(resp)
+    }
+
+    /// The HTTPS clone URL Azure reports for the repository.
+    pub async fn get_repository_remote_url(&self, repo_id: &str) -> Result<String> {
+        let url = format!(
+            "{}/{}/{}/_apis/git/repositories/{}?api-version=7.1",
+            self.base_url, self.org, self.project, repo_id
+        );
+
+        let repository = self
+            .client
+            .get(url)
+            .basic_auth("", Some(&self.pat))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AzureRepositoryDetail>()
+            .await?;
+
+        Ok(repository.remote_url)
     }
 
     /// Resolve a branch name to the exact commit that should be built.

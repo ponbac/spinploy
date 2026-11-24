@@ -48,7 +48,29 @@ pub struct AzurePullRequest {
     pub target_ref_name: Option<String>,
 }
 
-// Azure DevOps git.pullrequest.updated (PushNotification filtered) minimal payload
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzurePushEvent {
+    pub event_type: String,
+    pub resource: AzurePushResource,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzurePushResource {
+    pub push_id: u64,
+    pub repository: AzureBuildRepository,
+    pub ref_updates: Vec<AzureRefUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureRefUpdate {
+    pub name: String,
+    pub new_object_id: String,
+}
+
+// Azure DevOps git.pullrequest.updated minimal payload
 #[derive(Debug, Deserialize)]
 pub struct AzurePrUpdatedEvent {
     #[serde(rename = "eventType")]
@@ -185,19 +207,22 @@ pub struct AzureBuildListItem {
 // Azure DevOps REST: pull request detail
 #[derive(Debug, Deserialize)]
 pub struct AzurePullRequestDetail {
+    pub status: String,
     pub title: String,
     #[serde(rename = "sourceRefName")]
     pub source_ref_name: String,
     #[serde(rename = "targetRefName")]
     pub target_ref_name: String,
-    #[serde(rename = "lastMergeSourceCommit")]
-    pub last_merge_source_commit: AzureGitVersion,
+    /// Present only when the source branch lives in a fork of the target repository.
+    #[serde(rename = "forkSource", default)]
+    pub fork_source: Option<serde_json::Value>,
 }
 
+// Azure DevOps REST: repository detail
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AzureGitVersion {
-    pub commit_id: String,
+pub struct AzureRepositoryDetail {
+    pub remote_url: String,
 }
 
 #[derive(Debug, Deserialize)]
