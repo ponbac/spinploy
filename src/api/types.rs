@@ -22,6 +22,8 @@ pub struct PreviewSummary {
     pub dashboard_url: Option<String>,
     pub pr_url: Option<String>,
     pub containers: Vec<ContainerSummary>,
+    /// Why the latest build failed, when Spinploy still knows it.
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

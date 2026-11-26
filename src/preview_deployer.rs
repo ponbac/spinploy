@@ -48,6 +48,8 @@ pub struct PreviewReconcileSnapshot {
     pub pr_id: Option<String>,
     pub status: PreviewReconcileStatus,
     pub requested_at: String,
+    /// Why the latest reconcile failed; set only while `status` is `Failed`.
+    pub failure: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +215,7 @@ impl PreviewDeployer {
             pr_id: pr_id.clone(),
             status: PreviewReconcileStatus::Building,
             requested_at: chrono::Utc::now().to_rfc3339(),
+            failure: None,
         };
 
         let should_start_worker = {
@@ -316,6 +319,14 @@ impl PreviewDeployer {
         self.statuses.read().await.get(identifier).cloned()
     }
 
+    pub async fn failure(&self, identifier: &str) -> Option<String> {
+        self.statuses
+            .read()
+            .await
+            .get(identifier)
+            .and_then(|snapshot| snapshot.failure.clone())
+    }
+
     pub async fn snapshots(&self) -> Vec<PreviewReconcileSnapshot> {
         self.statuses.read().await.values().cloned().collect()
     }
@@ -391,13 +402,14 @@ impl PreviewDeployer {
             drop(permit);
 
             if self.is_current(&job).await {
-                let status = match &result {
-                    Ok(true) => PreviewReconcileStatus::Running,
-                    Ok(false) => PreviewReconcileStatus::Building,
-                    Err(_) => PreviewReconcileStatus::Failed,
+                let (status, failure) = match &result {
+                    Ok(true) => (PreviewReconcileStatus::Running, None),
+                    Ok(false) => (PreviewReconcileStatus::Building, None),
+                    Err(error) => (PreviewReconcileStatus::Failed, Some(format!("{error:#}"))),
                 };
                 if let Some(snapshot) = self.statuses.write().await.get_mut(&identifier) {
                     snapshot.status = status;
+                    snapshot.failure = failure;
                 }
             }
 
@@ -462,14 +474,15 @@ impl PreviewDeployer {
             "generated Compose file is missing Spinploy ownership labels"
         );
 
-        self.replace_dokploy_compose(job, &revision, compose_file)
+        let app_name = self
+            .replace_dokploy_compose(job, &revision, compose_file)
             .await?;
 
         if !self.is_current(job).await {
             return Ok(false);
         }
 
-        if !self.wait_until_ready(job, &revision).await? {
+        if !self.wait_until_ready(job, &revision, &app_name).await? {
             return Ok(false);
         }
         {
@@ -771,6 +784,7 @@ aspire do prepare-preview \
         Ok(image)
     }
 
+    /// Returns the Compose app name, which is also its Docker Compose project name.
     async fn replace_dokploy_compose(
         &self,
         job: &PreviewJob,
@@ -838,7 +852,7 @@ aspire do prepare-preview \
             .deploy_compose(&job.api_key, &compose.compose_id)
             .await
             .context("failed to deploy Dokploy compose")?;
-        Ok(compose.compose_id)
+        Ok(compose.app_name)
     }
 
     async fn create_domain(
@@ -940,7 +954,12 @@ aspire do prepare-preview \
             .context("Dokploy Compose lookup failed after retries"))
     }
 
-    async fn wait_until_ready(&self, job: &PreviewJob, revision: &str) -> Result<bool> {
+    async fn wait_until_ready(
+        &self,
+        job: &PreviewJob,
+        revision: &str,
+        app_name: &str,
+    ) -> Result<bool> {
         let url = self.frontend_url(&job.identifier);
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.config.preview_readiness_timeout_secs);
@@ -955,11 +974,48 @@ aspire do prepare-preview \
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
-        bail!(
+        let mut message = format!(
             "preview did not become healthy at {} within {} seconds",
-            url,
-            self.config.preview_readiness_timeout_secs
-        )
+            url, self.config.preview_readiness_timeout_secs
+        );
+        let failed = self.failed_services(app_name).await;
+        if !failed.is_empty() {
+            message.push_str(&format!(
+                "\nFailed services: {}. Check their container logs.",
+                failed.join(", ")
+            ));
+        }
+        bail!(message)
+    }
+
+    /// Compose services that stopped with a non-zero exit code, e.g. `api (exit 139)`.
+    async fn failed_services(&self, app_name: &str) -> Vec<String> {
+        let output = Command::new("docker")
+            .args(["ps", "--all", "--filter"])
+            .arg(format!("label=com.docker.compose.project={app_name}"))
+            .args([
+                "--format",
+                "{{.Label \"com.docker.compose.service\"}}|{{.Status}}",
+            ])
+            .output()
+            .await;
+        match output {
+            Ok(output) if output.status.success() => {
+                failed_services_from_ps(&String::from_utf8_lossy(&output.stdout))
+            }
+            Ok(output) => {
+                tracing::warn!(
+                    app_name,
+                    stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                    "Failed to list preview containers"
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                tracing::warn!(app_name, error = %error, "Failed to list preview containers");
+                Vec::new()
+            }
+        }
     }
 
     /// Remove enough old previews to reserve one of the three slots before an artifact
@@ -1480,6 +1536,20 @@ fn extract_zip_archive(archive_bytes: &[u8], destination: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Parses `docker ps` lines of `service|status`, keeping services that exited with a non-zero code.
+fn failed_services_from_ps(output: &str) -> Vec<String> {
+    let mut failed: Vec<String> = output
+        .lines()
+        .filter_map(|line| {
+            let (service, status) = line.split_once('|')?;
+            let code = status.strip_prefix("Exited (")?.split_once(')')?.0;
+            (code != "0").then(|| format!("{service} (exit {code})"))
+        })
+        .collect();
+    failed.sort();
+    failed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1497,6 +1567,16 @@ mod tests {
         assert!(validate_revision("0123456789abcdef0123456789abcdef01234567").is_ok());
         assert!(validate_revision("01234567").is_err());
         assert!(validate_revision("z123456789abcdef0123456789abcdef01234567").is_err());
+    }
+
+    #[test]
+    fn reports_only_services_that_exited_with_an_error() {
+        let output = "frontend|Created\napi|Exited (139) 2 minutes ago\nsql|Up 3 minutes\ndatabase-import|Exited (0) 3 minutes ago\ndatabase-seed|Exited (1) About a minute ago\n";
+
+        assert_eq!(
+            failed_services_from_ps(output),
+            vec!["api (exit 139)", "database-seed (exit 1)"]
+        );
     }
 
     #[test]

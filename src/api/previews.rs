@@ -92,6 +92,7 @@ async fn status_only_summary(
         dashboard_url: None,
         pr_url,
         containers: Vec::new(),
+        failure_reason: snapshot.failure,
     }
 }
 
@@ -368,6 +369,7 @@ pub async fn list_previews(
 
         // Extract branch from app_name (format: "preview-{identifier}")
         let branch = identifier.clone();
+        let failure_reason = state.preview_deployer.failure(&identifier).await;
 
         previews.push(PreviewSummary {
             identifier,
@@ -383,6 +385,7 @@ pub async fn list_previews(
             dashboard_url,
             pr_url,
             containers,
+            failure_reason,
         });
     }
 
@@ -541,6 +544,7 @@ pub async fn get_preview_detail(
         })
         .collect();
 
+    let failure_reason = state.preview_deployer.failure(&identifier).await;
     let summary = PreviewSummary {
         identifier,
         compose_id: Some(compose.compose_id),
@@ -555,6 +559,7 @@ pub async fn get_preview_detail(
         dashboard_url,
         pr_url,
         containers,
+        failure_reason,
     };
 
     Ok((

@@ -22,6 +22,7 @@ export interface PreviewSummary {
 	dashboardUrl: string | null;
 	prUrl: string | null;
 	containers: ContainerSummary[];
+	failureReason: string | null;
 }
 
 export interface DeploymentInfo {
