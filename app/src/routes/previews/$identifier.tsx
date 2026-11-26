@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import dayjs from "dayjs";
 import {
 	Activity,
+	AlertTriangle,
 	ArrowLeft,
 	Clock,
 	Container,
@@ -123,6 +124,20 @@ function PreviewDetailPage() {
 				<div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 					{/* Left Column - Main Info */}
 					<div className="lg:col-span-2 space-y-6">
+						{data.status === "Failed" && data.failureReason && (
+							<div className="bg-red-950/20 border-2 border-red-500/50">
+								<div className="bg-red-500/10 border-b-2 border-red-500/50 p-4 flex items-center gap-3">
+									<AlertTriangle className="text-red-400" size={20} />
+									<h2 className="font-mono text-lg font-bold text-red-400 uppercase tracking-wider">
+										[ Why it failed ]
+									</h2>
+								</div>
+								<pre className="p-6 font-mono text-sm text-red-100 whitespace-pre-wrap break-words">
+									{data.failureReason}
+								</pre>
+							</div>
+						)}
+
 						{/* Info Panel */}
 						<div className="bg-gray-950 border-2 border-gray-800">
 							<div className="bg-gray-900 border-b-2 border-gray-800 p-4">
